@@ -1,13 +1,5 @@
-﻿import argparse
-import difflib
-import json
-import math
-import re
-import sqlite3
-from collections import Counter
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+﻿from urllib.parse import parse_qs, urlparse
+import time
 
 try:
     from kiwipiepy import Kiwi
@@ -34,6 +26,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
     login_id = "test123"
     login_pw = "test123"
     _kiwi = None
+    _stats_cache = {}    # {(title_q, press_type, org, from, to): (timestamp, data)}
+    _keywords_cache = {} # {(top_n): (timestamp, data)}
+    CACHE_TTL = 300      # 5 minutes
 
     def _json_response(self, payload, status=200):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -266,27 +261,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         conn = self._db()
         try:
-            # BM25 path: fetch all candidates, score, then paginate
+            # FTS5 path: fetch matched rows directly from SQLite
             if title_q:
+                # Clean query for FTS MATCH
+                clean_q = re.sub(r'[^\w\s]', ' ', title_q).strip()
+                if not clean_q:
+                    self._json_response({"page": page, "page_size": page_size, "total": 0, "items": []})
+                    return
+
+                # Need count separately for FTS
+                count_sql = "SELECT COUNT(*) FROM articles_fts WHERE articles_fts MATCH ?"
+                total = conn.execute(count_sql, (clean_q,)).fetchone()[0]
+
                 data_sql = f"""
                     SELECT
                         a.id, a.source_system, a.source_channel, a.source_item_id,
                         a.title, a.published_at, a.organization, a.department,
-                        a.original_url, a.detail_url, a.content_text,
-                        (SELECT COUNT(*) FROM attachments at WHERE at.article_id = a.id) AS attachment_count
+                        a.original_url, a.detail_url,
+                        (SELECT COUNT(*) FROM attachments at WHERE at.article_id = a.id) AS attachment_count,
+                        bm25(articles_fts) as rank
                     FROM articles a
-                    {where_sql}
+                    JOIN articles_fts f ON a.id = f.rowid
+                    {where_sql.replace("WHERE", "AND") if where_sql else ""}
+                    WHERE articles_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ? OFFSET ?
                 """
-                all_rows = conn.execute(data_sql, params).fetchall()
-                query_tokens = self._simple_tokenize(title_q)
-                scored = self._bm25_score_rows(all_rows, query_tokens)
-                scored.sort(key=lambda x: -x["_bm25"])
-                total = len(scored)
-                page_items = scored[offset: offset + page_size]
-                for item in page_items:
-                    item.pop("_bm25", None)
-                    item.pop("content_text", None)
-                self._json_response({"page": page, "page_size": page_size, "total": total, "items": page_items})
+                rows = conn.execute(data_sql, params + [clean_q, page_size, offset]).fetchall()
+                self._json_response({"page": page, "page_size": page_size, "total": total, "items": [dict(r) for r in rows]})
                 return
 
             # Default path: date-sorted SQL
@@ -327,38 +329,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         """Lowercase token split for BM25."""
         return re.findall(r"[\uac00-\ud7a3a-zA-Z0-9]+", (text or "").lower())
 
-    @staticmethod
-    def _bm25_score_rows(rows, query_tokens, k1=1.5, b=0.75):
-        """Score rows with BM25. Title is weighted 3x. Returns list of dicts with _bm25 key."""
-        if not query_tokens or not rows:
-            return [dict(r) for r in rows]
-        token_pat = re.compile(r"[\uac00-\ud7a3a-zA-Z0-9]+")
-        doc_tokens = []
-        for row in rows:
-            title_toks = token_pat.findall((row["title"] or "").lower())
-            body_toks  = token_pat.findall((row["content_text"] or "").lower())
-            doc_tokens.append(title_toks * 3 + body_toks)
-        n = len(doc_tokens)
-        avgdl = sum(len(d) for d in doc_tokens) / n if n else 1.0
-        df = Counter()
-        for toks in doc_tokens:
-            ts = set(toks)
-            for qt in query_tokens:
-                if qt in ts:
-                    df[qt] += 1
-        idf = {qt: math.log((n - df[qt] + 0.5) / (df[qt] + 0.5) + 1) for qt in query_tokens}
-        result = []
-        for row, toks in zip(rows, doc_tokens):
-            dl = len(toks)
-            tf_map = Counter(toks)
-            score = sum(
-                idf[qt] * (tf_map.get(qt, 0) * (k1 + 1)) / (tf_map.get(qt, 0) + k1 * (1 - b + b * dl / avgdl))
-                for qt in query_tokens
-            )
-            item = dict(row)
-            item["_bm25"] = score
-            result.append(item)
-        return result
 
     def _build_article_where(self, title_q="", press_type="", organization="", from_date="", to_date=""):
         where = []
@@ -496,20 +466,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 params,
             ).fetchall()
 
-            self._json_response(
-                {
-                    "total": total,
-                    "by_organization": [{"name": r["organization"], "count": r["cnt"]} for r in org_rows],
-                    "by_type": [
-                        {
-                            "key": r["press_type"],
-                            "label": self._type_label(r["press_type"]),
-                            "count": r["cnt"],
-                        }
-                        for r in type_rows
-                    ],
-                }
-            )
+            payload = {
+                "total": total,
+                "by_organization": [{"name": r["organization"], "count": r["cnt"]} for r in org_rows],
+                "by_type": [
+                    {
+                        "key": r["press_type"],
+                        "label": self._type_label(r["press_type"]),
+                        "count": r["cnt"],
+                    }
+                    for r in type_rows
+                ],
+            }
+            self._stats_cache[cache_key] = (now, payload)
+            self._json_response(payload)
         finally:
             conn.close()
 
@@ -718,7 +688,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ).fetchall()
 
             keywords = self._extract_keywords(rows, top_n=top_n)
-            self._json_response({"range": range_key, "label": label, "items": keywords})
+            payload = {"range": range_key, "label": label, "items": keywords}
+            self._keywords_cache[cache_key] = (now, payload)
+            self._json_response(payload)
         finally:
             conn.close()
 

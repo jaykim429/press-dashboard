@@ -392,6 +392,37 @@ class ArticleRepository:
             )
             """
         )
+        # Performance Indexes
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published_at)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_org ON articles(organization)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_channel ON articles(source_channel)")
+
+        # FTS5 for Search Optimization
+        self.conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
+                title, content_text, content='articles', content_rowid='id', tokenize='unicode61'
+            )
+            """
+        )
+        # Sync triggers for FTS
+        self.conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS articles_ai AFTER INSERT ON articles BEGIN
+              INSERT INTO articles_fts(rowid, title, content_text) VALUES (new.id, new.title, new.content_text);
+            END;
+        """)
+        self.conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS articles_ad AFTER DELETE ON articles BEGIN
+              INSERT INTO articles_fts(articles_fts, rowid, title, content_text) VALUES('delete', old.id, old.title, old.content_text);
+            END;
+        """)
+        self.conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS articles_au AFTER UPDATE ON articles BEGIN
+              INSERT INTO articles_fts(articles_fts, rowid, title, content_text) VALUES('delete', old.id, old.title, old.content_text);
+              INSERT INTO articles_fts(rowid, title, content_text) VALUES (new.id, new.title, new.content_text);
+            END;
+        """)
+
         existing_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(articles)").fetchall()}
         if "effective_date" not in existing_cols:
             self.conn.execute("ALTER TABLE articles ADD COLUMN effective_date TEXT")
