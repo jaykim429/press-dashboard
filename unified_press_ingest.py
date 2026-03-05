@@ -2785,6 +2785,7 @@ class UnifiedIngestCliApp:
 
     def build_parser(self) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(description="Unified press ingestion pipeline")
+        parser.add_argument("--config", default="ingest_config.yaml", help="Path to config file")
         parser.add_argument("--service-key", required=True, help="data.go.kr service key")
         parser.add_argument("--start-date", required=True, help="YYYYMMDD")
         parser.add_argument("--end-date", required=True, help="YYYYMMDD")
