@@ -616,10 +616,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 WHERE id <> ?
                   AND title IS NOT NULL
                   AND trim(title) <> ''
+                  AND (organization = ? OR source_channel = ?)
                 ORDER BY id DESC
-                LIMIT 3000
+                LIMIT 500
                 """,
-                (article_id,),
+                (article_id, target["organization"], target["source_channel"]),
             ).fetchall()
 
             target_title = target["title"] or ""
