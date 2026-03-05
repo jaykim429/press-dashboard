@@ -1,0 +1,101 @@
+# ============================================================
+# 통합 보도자료 수집 설정 파일
+# 새 데이터 출처 추가 시 이 파일에 항목만 추가하면 됩니다.
+# ============================================================
+
+# 데이터 수집 기간 (run 스크립트에서 오버라이드 가능)
+date_window_days: 5 # 오늘 기준 최근 몇 일치를 수집할지
+
+# 수집기별 개별 설정
+# enabled: true/false 로 개별 수집기 활성/비활성
+# max_pages: 최대 페이지 수 (없으면 기본값 사용)
+collectors:
+  data_go_api:
+    enabled: true
+    description: "정책브리핑 API (data.go.kr)"
+    api_orgs:
+      - "금융위원회"
+      - "금융감독원"
+      - "한국은행"
+      - "기획재정부"
+      - "재정경제부"
+
+  fss:
+    enabled: true
+    description: "금융감독원 보도자료/보도설명자료 (스크래핑)"
+    max_pages: 141
+
+  fss_admin:
+    enabled: true
+    description: "금융감독원 행정지도 (스크래핑)"
+    max_pages: 5
+
+  fsc:
+    enabled: true
+    description: "금융위원회 보도설명자료/규정개정예고 (스크래핑)"
+    max_pages: 10
+
+  fsc_admin:
+    enabled: true
+    description: "금융위원회 행정지도 (스크래핑)"
+    max_pages: 5
+
+  fsc_reply:
+    enabled: true
+    description: "금융위원회 법령해석·비조치의견서 (스크래핑)"
+    max_pages: 5
+
+  bok:
+    enabled: true
+    description: "한국은행 보도자료 (스크래핑)"
+    max_pages: 10
+
+  kfb:
+    enabled: true
+    description: "전국은행연합회 기타자료 (스크래핑)"
+    max_pages: 10
+
+  fsec:
+    enabled: true
+    description: "금융보안원 자료 (스크래핑)"
+    max_pages: 10
+
+  ksd:
+    enabled: true
+    description: "한국예탁결제원 보도자료 (스크래핑)"
+    max_pages: 30
+
+  ksd_rule:
+    enabled: true
+    description: "한국예탁결제원 규정 제개정 예고 (스크래핑)"
+    max_pages: 10
+
+  krx_recent:
+    enabled: true
+    description: "한국거래소 최신 제·개정 정보 (스크래핑)"
+    max_pages: 5
+
+  krx_notice:
+    enabled: true
+    description: "한국거래소 규정 제개정 예고 (스크래핑)"
+    max_pages: 5
+
+  kofia_recent:
+    enabled: true
+    description: "금융투자협회 최신 제·개정 정보 (스크래핑)"
+    max_pages: 10
+
+  kofia_notice:
+    enabled: true
+    description: "금융투자협회 규정 제개정 예고 (스크래핑)"
+    max_pages: 10
+
+# ============================================================
+# 새 출처 추가 방법 (예시):
+# 1. aaa_new_source:             ← 새 collector 키 이름
+#      enabled: true
+#      description: "설명"
+#      max_pages: 5
+# 2. unified_press_ingest.py 에 BaseCollector 상속 클래스 추가
+# 3. COLLECTOR_REGISTRY 딕셔너리에 해당 클래스를 등록
+# ============================================================

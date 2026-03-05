@@ -1,0 +1,512 @@
+﻿<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>보도자료 상세 - 통합 보도자료 대시보드</title>
+  <style>
+    @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css");
+
+    :root {
+      --primary: #0163c7;
+      --primary-light: #0057c0;
+      --primary-dark: #003763;
+      --primary-bg: #ebf5ff;
+      --black-010: #121212;
+      --gray-030: #333333;
+      --gray-050: #8d8d8d;
+      --gray-060: #50504f;
+      --gray-070: #707070;
+      --gray-090: #aaaaaa;
+      --gray-100: #e5e7eb;
+      --gray-110: #f4f4f4;
+      --surface: #f9fafb;
+      --border: #e5e7eb;
+      --radius-s: 8px;
+      --radius-m: 12px;
+      --error: #e4022d;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Pretendard", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--black-010);
+      background: #ffffff;
+      line-height: 1.5;
+      letter-spacing: -0.01em;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Shared Top Nav ──────────────────────────── */
+    .top-nav { background: #ffffff; border-bottom: 1px solid var(--border); }
+    .nav-inner {
+      max-width: 1320px; margin: 0 auto; padding: 0 60px;
+      display: flex; justify-content: space-between; align-items: center; height: 64px;
+    }
+    .top-nav-left { display: flex; align-items: center; gap: 24px; }
+    .logo-area { display: flex; align-items: center; gap: 12px; text-decoration: none; }
+    .logo-img { height: 36px; width: auto; }
+    .logo-fallback {
+      display: none; width: 40px; height: 40px; border-radius: 50%;
+      background: var(--primary-bg); color: var(--primary); font-weight: 800;
+      align-items: center; justify-content: center;
+    }
+    .system-name { font-size: 20px; font-weight: 700; color: var(--gray-030); }
+    .top-nav-right { display: flex; align-items: center; gap: 16px; }
+    .user-info { font-size: 15px; color: var(--gray-060); }
+    .noti-btn {
+      background: none; border: none; cursor: pointer; position: relative;
+      display: flex; align-items: center; justify-content: center; color: var(--gray-060);
+    }
+    .noti-badge {
+      position: absolute; top: -2px; right: -2px; background: #ef4444; color: #fff;
+      font-size: 10px; font-weight: 700; width: 16px; height: 16px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .avatar {
+      width: 32px; height: 32px; border-radius: 50%; background: var(--primary-bg);
+      color: var(--primary); font-weight: 600; font-size: 14px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .logout-btn {
+      border: 1px solid var(--border); background: #ffffff; padding: 6px 12px;
+      border-radius: 16px; font-size: 14px; font-weight: 600; color: var(--gray-060);
+      cursor: pointer; display: flex; align-items: center; gap: 6px; font-family: inherit;
+    }
+
+    /* ── Article Layout ──────────────────────────── */
+    .article-wrap {
+      max-width: 1320px; margin: 36px auto; padding: 0 60px;
+    }
+
+    .article-back {
+      display: inline-flex; align-items: center; gap: 6px;
+      color: var(--primary); font-size: 14px; font-weight: 600;
+      text-decoration: none; margin-bottom: 20px;
+    }
+    .article-back:hover { text-decoration: underline; }
+
+    .article-title-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--primary);
+      border-radius: var(--radius-m);
+      padding: 20px 24px;
+      margin-bottom: 20px;
+    }
+    .article-type-badge {
+      display: inline-flex;
+      align-items: center;
+      background: var(--primary-bg);
+      border: 1px solid #cce0ff;
+      color: var(--primary);
+      border-radius: 20px;
+      padding: 3px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+    .article-title {
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.45;
+      letter-spacing: -0.02em;
+      color: var(--black-010);
+      margin: 0;
+    }
+    .article-title-meta {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+      font-size: 13px;
+      color: var(--gray-060);
+    }
+
+    .article-body-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 340px;
+      gap: 24px;
+      align-items: start;
+    }
+
+    .article-card {
+      background: #ffffff; border: 1px solid var(--border);
+      border-radius: var(--radius-m); padding: 24px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.02);
+    }
+
+    .section-title {
+      font-size: 16px; font-weight: 700; color: #111;
+      margin-bottom: 16px; padding-bottom: 12px;
+      border-bottom: 2px solid var(--primary);
+    }
+
+    /* Meta table */
+    .meta-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+    }
+    .meta-item {
+      display: flex; gap: 10px; align-items: baseline;
+      padding: 10px 0; border-bottom: 1px solid var(--border);
+      font-size: 14px; color: var(--gray-060); min-height: 40px;
+    }
+    .meta-item strong {
+      min-width: 70px; color: var(--gray-030); font-weight: 700; flex-shrink: 0;
+    }
+    .meta-item a { color: var(--primary); text-decoration: none; font-weight: 600; }
+    .meta-item a:hover { text-decoration: underline; }
+
+    /* Content body */
+    .content-body {
+      border: 1px solid var(--border); border-radius: var(--radius-s);
+      background: var(--surface); min-height: 200px; padding: 20px;
+      font-size: 15px; line-height: 1.75; color: #1f2937; overflow: auto;
+    }
+    .content-body, .content-body * {
+      font-family: "Pretendard", "Malgun Gothic", sans-serif !important;
+    }
+    .content-body.plain { white-space: pre-wrap; }
+    .content-body h1, .content-body h2, .content-body h3 {
+      font-size: 16px !important; font-weight: 700 !important; margin: 12px 0 8px !important;
+    }
+    .content-body p { margin: 0 0 10px; }
+    .content-body img { max-width: 100%; height: auto; }
+    .content-body table { width: 100%; border-collapse: collapse; margin: 8px 0 12px; }
+    .content-body td, .content-body th {
+      border: 1px solid var(--border); padding: 8px; vertical-align: top;
+      font-size: 13px; line-height: 1.6;
+    }
+
+    /* Attachments */
+    .att-list { list-style: none; }
+    .att-list li {
+      border-bottom: 1px solid var(--border); padding: 10px 0;
+      font-size: 14px; word-break: break-all;
+    }
+    .att-list li:last-child { border-bottom: 0; }
+    .att-list a {
+      color: var(--primary); text-decoration: none; font-weight: 600;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .att-list a:hover { text-decoration: underline; }
+
+    /* Similar */
+    .similar-list { list-style: none; }
+    .similar-list li { border-bottom: 1px solid var(--border); padding: 12px 0; }
+    .similar-list li:last-child { border-bottom: 0; }
+    .similar-list a {
+      color: var(--black-010); text-decoration: none; font-weight: 600;
+      font-size: 14px; line-height: 1.5; display: block;
+    }
+    .similar-list a:hover { color: var(--primary); }
+    .similar-meta { margin-top: 4px; font-size: 12px; color: var(--gray-060); }
+
+    .empty { color: var(--gray-060); font-size: 14px; padding: 8px 0; }
+    .error-msg { color: var(--error); font-size: 14px; font-weight: 700; }
+
+    @media (max-width: 1024px) {
+      .article-wrap { padding: 0 20px; margin: 24px auto; }
+      .nav-inner { padding: 0 20px; }
+      .article-body-grid { grid-template-columns: 1fr; }
+      .article-title { font-size: 20px; }
+      .meta-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Shared Top Navigation -->
+  <header class="top-nav">
+    <div class="nav-inner">
+      <div class="top-nav-left">
+        <a href="/dashboard" class="logo-area">
+          <img src="/cgin_logo.png" alt="로고" class="logo-img" onerror="this.style.display='none'; document.getElementById('logoFallback').style.display='flex';" />
+          <div id="logoFallback" class="logo-fallback">CG</div>
+          <span class="system-name">통합 보도자료 대시보드</span>
+        </a>
+      </div>
+      <div class="top-nav-right">
+        <span class="user-info">admin | 열람권한자</span>
+        <div class="avatar">관</div>
+        <button class="logout-btn" onclick="location.href='/login'">
+          로그아웃
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <div class="article-wrap">
+    <!-- Back link -->
+    <a class="article-back" href="/dashboard">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+      목록으로 돌아가기
+    </a>
+
+    <!-- Title card -->
+    <div class="article-title-card">
+      <div class="article-type-badge" id="typeBadge">로딩 중...</div>
+      <h1 class="article-title" id="title">로딩 중...</h1>
+      <div class="article-title-meta" id="titleMeta"></div>
+    </div>
+
+    <!-- Body grid: main content | sidebar -->
+    <div class="article-body-grid">
+      <!-- Left: meta + content + attachments -->
+      <div>
+        <div class="article-card" style="margin-bottom:20px;">
+          <h2 class="section-title">기본 정보</h2>
+          <div class="meta-grid" id="meta"></div>
+        </div>
+
+        <div class="article-card">
+          <h2 class="section-title">상세 내용</h2>
+          <div class="content-body" id="content"></div>
+
+          <div style="margin-top:24px;">
+            <h2 class="section-title">첨부 자료</h2>
+            <ul class="att-list" id="attList"></ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right sidebar: similar articles -->
+      <div class="article-card">
+        <h2 class="section-title">유사한 공시</h2>
+        <ul class="similar-list" id="similarList">
+          <li class="empty">불러오는 중...</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    class TextUtil {
+      static escapeHtml(value) {
+        if (value == null) return "";
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;");
+      }
+      static decodeEntities(value) {
+        if (value == null) return "";
+        const ta = document.createElement("textarea");
+        ta.innerHTML = String(value);
+        return ta.value;
+      }
+      static safe(value) { return TextUtil.escapeHtml(TextUtil.decodeEntities(value)); }
+    }
+
+    class DateUtil {
+      static onlyDate(value) {
+        if (!value) return "";
+        const s = String(value).trim().slice(0, 10).replace(/[./]/g, "-");
+        const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+        if (!m) return s;
+        return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+      }
+    }
+
+    class ChannelUtil {
+      static label(ch) {
+        if (ch === "fss_press_explainer" || ch === "fsc_press_explainer") return "보도설명자료";
+        if (ch === "fsc_admin_guidance_notice" || ch === "fss_admin_guidance_notice") return "행정지도예고";
+        if (ch === "fsc_admin_guidance_enforcement" || ch === "fss_admin_guidance_enforcement") return "행정지도시행";
+        if (ch === "fsc_law_interpretation") return "법령해석";
+        if (ch === "fsc_no_action_opinion") return "비조치의견서";
+        if (["fsc_rule_change_notice","ksd_rule_change_notice","krx_rule_change_notice","kofia_rule_change_notice"].includes(ch)) return "규정 제개정 예고";
+        if (["fsc_regulation_notice","krx_recent_rule_change","kofia_recent_rule_change"].includes(ch)) return "최신 제·개정 정보";
+        if (ch === "kfb_publicdata_other" || ch === "fsec_bbs_222") return "기타자료";
+        return "보도자료";
+      }
+    }
+
+    class HtmlUtil {
+      static sanitize(html) {
+        const t = document.createElement("template");
+        t.innerHTML = html;
+        t.content.querySelectorAll("script,style,iframe,object,embed,link,meta").forEach(el => el.remove());
+        t.content.querySelectorAll("*").forEach(el => {
+          [...el.attributes].forEach(attr => {
+            const n = attr.name.toLowerCase();
+            if (n.startsWith("on") || n === "style") el.removeAttribute(attr.name);
+          });
+        });
+        return t.innerHTML;
+      }
+    }
+
+    class UrlUtil {
+      static preferredOrigin(data) {
+        const org = (data.organization || "").trim();
+        if (data.source_system === "data_go_api") {
+          if (org === "금융위원회") return "https://www.fsc.go.kr";
+          if (org === "개인정보보호위원회") return "https://www.pipc.go.kr";
+          if (org === "재정경제부") return "https://www.moef.go.kr";
+        }
+        for (const u of [data.detail_url, data.original_url]) {
+          if (!u) continue;
+          try { return new URL(u).origin; } catch (_) {}
+        }
+        return window.location.origin;
+      }
+      static toAbsolute(raw, baseOrigin) {
+        if (!raw) return "";
+        const v = TextUtil.decodeEntities(String(raw)).trim();
+        if (!v || v.startsWith("#") || v.toLowerCase().startsWith("javascript:")) return v;
+        try { return new URL(v, `${baseOrigin}/`).toString(); } catch (_) { return v; }
+      }
+      static normalizeEmbeddedUrls(container, data) {
+        const defaultOrigin = UrlUtil.preferredOrigin(data);
+        const org = (data.organization || "").trim();
+        container.querySelectorAll("[src],[href]").forEach(el => {
+          if (el.hasAttribute("src")) {
+            const rawSrc = el.getAttribute("src");
+            const baseOrigin = rawSrc && rawSrc.startsWith("/comm/") && org === "금융위원회" ? "https://www.fsc.go.kr" : defaultOrigin;
+            const fixed = UrlUtil.toAbsolute(rawSrc, baseOrigin);
+            if (fixed) el.setAttribute("src", fixed); else el.removeAttribute("src");
+          }
+          if (el.hasAttribute("href")) {
+            const fixed = UrlUtil.toAbsolute(el.getAttribute("href"), defaultOrigin);
+            if (fixed) {
+              el.setAttribute("href", fixed);
+              if (/^https?:/i.test(fixed)) { el.setAttribute("target","_blank"); el.setAttribute("rel","noopener noreferrer"); }
+            } else el.removeAttribute("href");
+          }
+        });
+      }
+    }
+
+    class ArticlePage {
+      constructor() {
+        this.el = {
+          typeBadge: document.getElementById("typeBadge"),
+          title: document.getElementById("title"),
+          titleMeta: document.getElementById("titleMeta"),
+          meta: document.getElementById("meta"),
+          content: document.getElementById("content"),
+          attList: document.getElementById("attList"),
+          similarList: document.getElementById("similarList"),
+        };
+      }
+
+      getArticleId() { return new URLSearchParams(window.location.search).get("id"); }
+
+      async init() {
+        const id = this.getArticleId();
+        if (!id) { this.showError("잘못된 접근입니다: id 파라미터가 없습니다."); return; }
+        try {
+          const res = await fetch(`/api/article?id=${encodeURIComponent(id)}`);
+          if (!res.ok) { this.showError(`상세 조회 실패 (${res.status})`); return; }
+          const data = await res.json();
+          this.render(data);
+          await this.renderSimilar(id);
+        } catch (err) {
+          this.showError(`상세 조회 중 오류가 발생했습니다. (${TextUtil.safe(err.message)})`);
+        }
+      }
+
+      showError(message) {
+        this.el.title.textContent = message;
+        this.el.content.classList.add("plain");
+        this.el.content.innerHTML = `<div class="error-msg">${TextUtil.safe(message)}</div>`;
+      }
+
+      render(data) {
+        const title = TextUtil.decodeEntities(data.title || "(제목 없음)");
+        document.title = `${title} | 통합 보도자료 대시보드`;
+
+        // Title card
+        this.el.typeBadge.textContent = ChannelUtil.label(data.source_channel || "");
+        this.el.title.textContent = title;
+        this.el.titleMeta.innerHTML = [
+          data.organization && `<span>${TextUtil.safe(data.organization)}</span>`,
+          data.department && `<span>${TextUtil.safe(data.department)}</span>`,
+          data.published_at && `<span>발행일 ${TextUtil.safe(DateUtil.onlyDate(data.published_at))}</span>`,
+        ].filter(Boolean).join("");
+
+        // Meta table
+        const ext = data.original_url || data.detail_url || "";
+        const rows = [
+          ["자료 구분", ChannelUtil.label(data.source_channel || "")],
+          ["기관", data.organization || "-"],
+          ["부서", data.department || "-"],
+          ["발행일자", DateUtil.onlyDate(data.published_at) || "-"],
+          data.amendment_type && ["처리구분", data.amendment_type],
+          data.public_yn && ["공개여부", data.public_yn],
+          data.registrant && ["등록자", data.registrant],
+          data.reply_date && ["회신일", DateUtil.onlyDate(data.reply_date)],
+          data.case_number && ["일련번호", data.case_number],
+          (data.notice_start || data.notice_end) && ["예고기간", [DateUtil.onlyDate(data.notice_start), DateUtil.onlyDate(data.notice_end)].filter(Boolean).join(" ~ ")],
+          data.effective_date && ["시행일", DateUtil.onlyDate(data.effective_date)],
+          data.enforcement_status && ["시행여부", data.enforcement_status],
+        ].filter(Boolean);
+
+        this.el.meta.innerHTML = rows.map(([label, val]) =>
+          `<div class="meta-item"><strong>${TextUtil.safe(label)}</strong><span>${TextUtil.safe(String(val))}</span></div>`
+        ).join("") + (ext ? `<div class="meta-item"><strong>원문 링크</strong><a href="${TextUtil.escapeHtml(ext)}" target="_blank" rel="noopener noreferrer">원문 보기 →</a></div>` : "");
+
+        this.renderContent(data);
+        this.renderAttachments(data.attachments || []);
+      }
+
+      renderContent(data) {
+        const htmlBody = TextUtil.decodeEntities(data.content_html || "");
+        if (htmlBody.trim()) {
+          this.el.content.classList.remove("plain");
+          this.el.content.innerHTML = HtmlUtil.sanitize(htmlBody);
+          UrlUtil.normalizeEmbeddedUrls(this.el.content, data);
+          return;
+        }
+        this.el.content.classList.add("plain");
+        this.el.content.textContent = TextUtil.decodeEntities(data.content_text || "(본문 없음)");
+      }
+
+      renderAttachments(items) {
+        if (!items.length) {
+          this.el.attList.innerHTML = `<li class="empty">첨부파일이 없습니다.</li>`;
+          return;
+        }
+        this.el.attList.innerHTML = items.map(att => {
+          const name = TextUtil.safe(att.file_name || "(이름 없음)");
+          const url = TextUtil.escapeHtml(att.file_url || "");
+          return `<li><a href="${url}" target="_blank" rel="noopener noreferrer">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            ${name}</a></li>`;
+        }).join("");
+      }
+
+      async renderSimilar(articleId) {
+        try {
+          const res = await fetch(`/api/similar?id=${encodeURIComponent(articleId)}&limit=8`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          const items = data.items || [];
+          if (!items.length) {
+            this.el.similarList.innerHTML = `<li class="empty">유사한 공시가 없습니다.</li>`;
+            return;
+          }
+          this.el.similarList.innerHTML = items.map(it => {
+            const title = TextUtil.safe(it.title || "");
+            const org = TextUtil.safe(it.organization || "");
+            const date = TextUtil.safe(DateUtil.onlyDate(it.published_at));
+            const pct = Math.round(Number(it.similarity || 0) * 100);
+            return `<li>
+              <a href="/article?id=${it.id}">${title}</a>
+              <div class="similar-meta">${org} · ${date} · 유사도 ${pct}%</div>
+            </li>`;
+          }).join("");
+        } catch (_) {
+          this.el.similarList.innerHTML = `<li class="empty">유사 공시를 불러오지 못했습니다.</li>`;
+        }
+      }
+    }
+
+    new ArticlePage().init();
+  </script>
+</body>
+</html>
