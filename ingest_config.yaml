@@ -4,7 +4,7 @@
 # ============================================================
 
 # 데이터 수집 기간 (run 스크립트에서 오버라이드 가능)
-date_window_days: 5 # 오늘 기준 최근 몇 일치를 수집할지
+date_window_days: 365 # 오늘 기준 최근 몇 일치를 수집할지
 
 # 수집기별 개별 설정
 # enabled: true/false 로 개별 수집기 활성/비활성
@@ -28,7 +28,7 @@ collectors:
   fss_admin:
     enabled: true
     description: "금융감독원 행정지도 (스크래핑)"
-    max_pages: 5
+    max_pages: 10
 
   fsc:
     enabled: true
@@ -38,12 +38,12 @@ collectors:
   fsc_admin:
     enabled: true
     description: "금융위원회 행정지도 (스크래핑)"
-    max_pages: 5
+    max_pages: 10
 
   fsc_reply:
     enabled: true
     description: "금융위원회 법령해석·비조치의견서 (스크래핑)"
-    max_pages: 5
+    max_pages: 10
 
   bok:
     enabled: true
@@ -73,12 +73,12 @@ collectors:
   krx_recent:
     enabled: true
     description: "한국거래소 최신 제·개정 정보 (스크래핑)"
-    max_pages: 5
+    max_pages: 10
 
   krx_notice:
     enabled: true
     description: "한국거래소 규정 제개정 예고 (스크래핑)"
-    max_pages: 5
+    max_pages: 10
 
   kofia_recent:
     enabled: true
