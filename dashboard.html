@@ -205,10 +205,13 @@
     .noti-close-btn:hover { color:var(--black-010); }
     .noti-modal-body { overflow-y:auto; flex:1; padding:8px 0; }
     .noti-empty { text-align:center; padding:32px 20px; color:var(--gray-060); font-size:14px; }
-    .noti-group { padding:12px 20px; border-bottom:1px solid var(--border); }
-    .noti-group:last-child { border-bottom:0; }
-    .noti-gname { font-size:14px; font-weight:700; color:var(--black-010); margin-bottom:8px; }
-    .noti-type-row { display:flex; justify-content:space-between; padding:4px 0; font-size:13px; color:var(--gray-060); }
+    .noti-list { list-style: none; margin: 0; padding: 0; }
+    .noti-list-item { display:flex; justify-content:space-between; align-items:center; padding:10px 20px; border-bottom:1px solid var(--border); }
+    .noti-list-item:last-child { border-bottom:none; }
+    .noti-list-item:hover { background: var(--surface); }
+    .noti-item-left { display:flex; align-items:center; gap:8px; }
+    .noti-org { font-size:14px; font-weight:700; color:var(--black-010); }
+    .noti-type { font-size:13px; color:var(--gray-060); }
     .noti-badge { background:var(--primary-bg); color:var(--primary); font-size:12px; font-weight:700; border-radius:10px; padding:1px 9px; }
     .noti-modal-footer { padding:12px 20px; border-top:1px solid var(--border); flex-shrink:0; }
     .noti-read-btn { width:100%; padding:9px; background:var(--primary); color:#fff; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; font-family:inherit; }
@@ -1421,16 +1424,23 @@
         document.getElementById("notiReadBtn").style.display = "none";
         return;
       }
+
+      const allItems = [];
+      groups.forEach(g => {
+        g.items.forEach(it => {
+          allItems.push({ org: g.organization, type: it.type, count: it.count });
+        });
+      });
+
       document.getElementById("notiReadBtn").style.display = "";
-      body.innerHTML = groups.map(g => `
-        <div class="noti-group">
-          <div class="noti-gname">${TextUtil.safe(g.organization)}</div>
-          ${g.items.map(it => `
-            <div class="noti-type-row">
-              <span>${TextUtil.safe(it.type)}</span>
-              <span class="noti-badge">${it.count}건</span>
-            </div>`).join("")}
-        </div>`).join("");
+      body.innerHTML = `<ul class="noti-list">` + allItems.map(it => `
+        <li class="noti-list-item">
+          <div class="noti-item-left">
+            <span class="noti-org">${TextUtil.safe(it.org)}</span>
+            <span class="noti-type">${TextUtil.safe(it.type)}</span>
+          </div>
+          <span class="noti-badge">${it.count}건</span>
+        </li>`).join("") + `</ul>`;
     }
 
     function closeNotiModal() {
