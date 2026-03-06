@@ -273,13 +273,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             total = conn.execute(f"SELECT COUNT(*) {from_expr} {where_sql}", params).fetchone()[0]
 
             order_dir = "ASC" if sort_order == "asc" else "DESC"
-            
-            # If search query exists, FTS rank is available and should be the primary sort
-            clean_q = re.sub(r'[^\w\s]', ' ', title_q).strip()
-            if clean_q:
-                order_clause = f"ORDER BY bm25(f.articles_fts), a.published_at {order_dir}, a.id {order_dir}"
-            else:
-                order_clause = f"ORDER BY a.published_at {order_dir}, a.id {order_dir}"
+            # Sort by date strictly since BM25 breaks with the IN(...) subquery and LIKE fallback
+            order_clause = f"ORDER BY a.published_at {order_dir}, a.id {order_dir}"
 
             data_sql = f"""
                 SELECT
@@ -325,9 +320,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if title_q:
             clean_q = re.sub(r'[^\w\s]', ' ', title_q).strip()
             if clean_q:
-                join_sql = "JOIN articles_fts f ON a.id = f.rowid"
-                where.append("f.articles_fts MATCH ?")
-                params.append(clean_q)
+                words = clean_q.split()
+                if len(words) > 1:
+                    joined_word = "".join(words)
+                    and_words = " AND ".join(words)
+                    match_query = f'"{clean_q}" OR "{joined_word}" OR ({and_words})'
+                else:
+                    joined_word = clean_q
+                    match_query = f'"{clean_q}"*'
+                    
+                where.append("(a.id IN (SELECT rowid FROM articles_fts WHERE articles_fts MATCH ?) OR replace(a.title, ' ', '') LIKE ?)")
+                params.extend([match_query, f"%{joined_word}%"])
                 
         if press_type == "press_release":
             where.append("a.source_channel IN (?, ?, ?, ?)")
