@@ -1115,7 +1115,7 @@
       async loadKeywords() {
         try {
           const data = await this.api.getJson(`/api/keywords?top_n=12`);
-          const items = data.items || [];
+          const items = Array.isArray(data) ? data : (data.items || []);
           this.el.keywordSub.textContent = `오늘 기준 · 클릭하면 바로 검색`;
           if (!items.length) {
             this.el.keywordRow.innerHTML = `<span class="keyword-empty">표시할 키워드가 없습니다.</span>`;

@@ -606,24 +606,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 (match_query, article_id, target["organization"], target["source_channel"], limit),
             ).fetchall()
 
-            scored = []
+            items = []
             if rows:
-                max_rank = min((r["rank"] for r in rows), default=-0.1)
                 for row in rows:
-                    item = dict(row)
-                    # Convert FTS5 BM25 negative score to a 0-100 scale based on the most relevant (lowest negative value) representing ~99%
-                    raw_score = row["rank"]
-                    if raw_score >= 0:
-                        sim_pct = 0
-                    else:
-                        relative = max_rank / raw_score # e.g. -10 / -20 = 0.5
-                        sim_pct = int(min(99, max(1, relative * 99)))
-                    item["similarity"] = sim_pct
-                    scored.append(item)
+                    items.append(
+                        {
+                            "id": row["id"],
+                            "title": row["title"],
+                            "published_at": row["published_at"],
+                            "organization": row["organization"],
+                            "source_channel": row["source_channel"],
+                        }
+                    )
 
             self._json_response({
                 "id": article_id,
-                "items": scored
+                "items": items
             })
         finally:
             conn.close()

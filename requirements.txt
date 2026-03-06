@@ -4,3 +4,4 @@ numpy<2
 kiwipiepy>=0.17.1,<0.18
 playwright>=1.40.0
 pyyaml>=6.0
+pypdf>=5.1.0

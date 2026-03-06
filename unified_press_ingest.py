@@ -1,5 +1,6 @@
 import argparse
 import datetime as dt
+import hashlib
 import html
 import json
 import re
@@ -223,6 +224,12 @@ def infer_file_name_from_url(file_url: Optional[str]) -> str:
     name = path.split("/")[-1]
     return name if name else "unknown_file"
 
+
+def hash_text_sha256(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
 def normalize_published_date(date_str: Optional[str]) -> Optional[str]:
     if not date_str:
         return date_str
@@ -391,9 +398,100 @@ class ArticleRepository:
               file_name TEXT,
               file_url TEXT NOT NULL,
               file_ext TEXT,
+              url_hash TEXT,
+              document_id INTEGER,
+              processing_status TEXT DEFAULT 'pending',
+              last_error TEXT,
+              last_processed_at TEXT,
               raw_json TEXT,
               UNIQUE(article_id, file_url),
               FOREIGN KEY(article_id) REFERENCES articles(id)
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS attachment_documents (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              canonical_url TEXT NOT NULL UNIQUE,
+              url_hash TEXT UNIQUE,
+              storage_path TEXT,
+              download_status TEXT NOT NULL DEFAULT 'pending',
+              http_status INTEGER,
+              content_type TEXT,
+              file_size INTEGER,
+              sha256 TEXT,
+              etag TEXT,
+              last_modified TEXT,
+              retry_count INTEGER NOT NULL DEFAULT 0,
+              first_seen_at TEXT NOT NULL,
+              last_seen_at TEXT NOT NULL,
+              last_error TEXT
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS attachment_extractions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              document_id INTEGER NOT NULL,
+              extractor_name TEXT NOT NULL,
+              extractor_version TEXT NOT NULL,
+              status TEXT NOT NULL,
+              text_content TEXT,
+              char_count INTEGER,
+              token_estimate INTEGER,
+              metadata_json TEXT,
+              error_message TEXT,
+              created_at TEXT NOT NULL,
+              UNIQUE(document_id, extractor_name, extractor_version),
+              FOREIGN KEY(document_id) REFERENCES attachment_documents(id)
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS report_jobs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              job_type TEXT NOT NULL,
+              status TEXT NOT NULL,
+              params_json TEXT,
+              model_name TEXT,
+              requested_at TEXT NOT NULL,
+              started_at TEXT,
+              completed_at TEXT,
+              error_message TEXT
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS report_outputs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              job_id INTEGER NOT NULL,
+              title TEXT,
+              summary_text TEXT,
+              report_markdown TEXT,
+              report_json TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(job_id) REFERENCES report_jobs(id)
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS report_output_sources (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              report_output_id INTEGER NOT NULL,
+              article_id INTEGER,
+              attachment_id INTEGER,
+              document_id INTEGER,
+              extraction_id INTEGER,
+              relevance_score REAL,
+              citation_text TEXT,
+              created_at TEXT NOT NULL,
+              UNIQUE(report_output_id, article_id, attachment_id, document_id, extraction_id),
+              FOREIGN KEY(report_output_id) REFERENCES report_outputs(id)
             )
             """
         )
@@ -401,6 +499,16 @@ class ArticleRepository:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published_at)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_org ON articles(organization)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_channel ON articles(source_channel)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_article ON attachments(article_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_url_hash ON attachments(url_hash)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_document ON attachments(document_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_status ON attachments(processing_status)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment_docs_status ON attachment_documents(download_status)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment_docs_hash ON attachment_documents(url_hash)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment_extract_doc ON attachment_extractions(document_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_jobs_status ON report_jobs(status)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_outputs_job ON report_outputs(job_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_sources_output ON report_output_sources(report_output_id)")
 
         # FTS5 for Search Optimization
         self.conn.execute(
@@ -433,6 +541,17 @@ class ArticleRepository:
             self.conn.execute("ALTER TABLE articles ADD COLUMN effective_date TEXT")
         if "amendment_type" not in existing_cols:
             self.conn.execute("ALTER TABLE articles ADD COLUMN amendment_type TEXT")
+        attachment_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(attachments)").fetchall()}
+        if "url_hash" not in attachment_cols:
+            self.conn.execute("ALTER TABLE attachments ADD COLUMN url_hash TEXT")
+        if "document_id" not in attachment_cols:
+            self.conn.execute("ALTER TABLE attachments ADD COLUMN document_id INTEGER")
+        if "processing_status" not in attachment_cols:
+            self.conn.execute("ALTER TABLE attachments ADD COLUMN processing_status TEXT DEFAULT 'pending'")
+        if "last_error" not in attachment_cols:
+            self.conn.execute("ALTER TABLE attachments ADD COLUMN last_error TEXT")
+        if "last_processed_at" not in attachment_cols:
+            self.conn.execute("ALTER TABLE attachments ADD COLUMN last_processed_at TEXT")
         self.conn.commit()
 
     def upsert_article(self, article: Dict[str, Any]) -> int:
@@ -488,20 +607,29 @@ class ArticleRepository:
 
     def upsert_attachments(self, article_id: int, attachments: Sequence[Dict[str, Any]]) -> None:
         for att in attachments:
+            file_url = att.get("file_url")
+            url_hash = hash_text_sha256(file_url)
             self.conn.execute(
                 """
-                INSERT INTO attachments (article_id, file_name, file_url, file_ext, raw_json)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO attachments (
+                  article_id, file_name, file_url, file_ext, url_hash, processing_status, raw_json
+                )
+                VALUES (?, ?, ?, ?, ?, 'pending', ?)
                 ON CONFLICT(article_id, file_url) DO UPDATE SET
                   file_name=excluded.file_name,
                   file_ext=excluded.file_ext,
+                  url_hash=excluded.url_hash,
+                  processing_status='pending',
+                  last_error=NULL,
+                  last_processed_at=NULL,
                   raw_json=excluded.raw_json
                 """,
                 (
                     article_id,
                     att.get("file_name"),
-                    att.get("file_url"),
+                    file_url,
                     att.get("file_ext"),
+                    url_hash,
                     json.dumps(att, ensure_ascii=False),
                 ),
             )

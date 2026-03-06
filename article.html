@@ -494,7 +494,6 @@
             const title = TextUtil.safe(it.title || "");
             const org = TextUtil.safe(it.organization || "");
             const date = TextUtil.safe(DateUtil.onlyDate(it.published_at));
-            const pct = Math.round(Number(it.similarity || 0));
             return `<li>
               <a href="/article?id=${it.id}">${title}</a>
               <div class="similar-meta">${org} · ${date}</div>

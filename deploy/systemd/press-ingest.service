@@ -1,0 +1,13 @@
+[Unit]
+Description=Press Daily Ingest Job
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/wjdgns429/press-dashboard
+ExecStart=/home/wjdgns429/press-dashboard/run_daily_ingest.sh
+User=wjdgns429
+Group=wjdgns429
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/home/wjdgns429/press-dashboard/logs/ingest-systemd.log
+StandardError=append:/home/wjdgns429/press-dashboard/logs/ingest-systemd.log
