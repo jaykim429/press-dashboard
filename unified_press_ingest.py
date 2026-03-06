@@ -2792,7 +2792,8 @@ class UnifiedPressIngestService:
             print("[INFO] Pre-computing analytics (keywords)...")
             try:
                 from local_dashboard import DashboardHandler
-                rows = conn.execute("SELECT title, content_text FROM articles ORDER BY id DESC LIMIT 1200").fetchall()
+                # Limit to 300 recent articles for realistic extraction speed while maintaining quality
+                rows = conn.execute("SELECT title, content_text FROM articles ORDER BY id DESC LIMIT 300").fetchall()
                 docs = [{"title": r[0], "content_text": r[1]} for r in rows]
                 keywords = DashboardHandler._extract_keywords(docs, top_n=12)
                 
