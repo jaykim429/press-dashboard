@@ -552,6 +552,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             payload["reason_text"] = raw.get("reason_text")
             payload["case_number"] = raw.get("case_number")
             payload.pop("raw_json", None)
+            
+            # Collapse excessive newlines for better readability
+            if payload.get("content_text"):
+                payload["content_text"] = re.sub(r'\n{3,}', '\n\n', payload["content_text"])
+                
             payload["attachments"] = [dict(a) for a in atts]
             self._json_response(payload)
         finally:
@@ -599,10 +604,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ).fetchall()
 
             scored = []
-            for row in rows:
-                item = dict(row)
-                item["similarity"] = round(row["rank"], 4)
-                scored.append(item)
+            if rows:
+                max_rank = min((r["rank"] for r in rows), default=-0.1)
+                for row in rows:
+                    item = dict(row)
+                    # Convert FTS5 BM25 negative score to a 0-100 scale based on the most relevant (lowest negative value) representing ~99%
+                    raw_score = row["rank"]
+                    if raw_score >= 0:
+                        sim_pct = 0
+                    else:
+                        relative = max_rank / raw_score # e.g. -10 / -20 = 0.5
+                        sim_pct = int(min(99, max(1, relative * 99)))
+                    item["similarity"] = sim_pct
+                    scored.append(item)
 
             self._json_response({
                 "id": article_id,
