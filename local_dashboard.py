@@ -388,6 +388,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return from_expr, where_sql, params
 
     def handle_stats(self, qs):
+        now = time.time()
         title_q = (qs.get("q", [""])[0] or "").strip()
         press_type = (qs.get("press_type", [""])[0] or "").strip()
         organization = (qs.get("organization", [""])[0] or "").strip()
@@ -470,6 +471,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     for r in type_rows
                 ],
             }
+            # Cache key definition was missing as well.
+            cache_key = f"stats_{title_q}_{press_type}_{organization}_{from_date}_{to_date}_{top_n}"
             self._stats_cache[cache_key] = (now, payload)
             self._json_response(payload)
         finally:
