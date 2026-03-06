@@ -685,7 +685,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         since_date = (qs.get("since", [""])[0] or "").strip()
         conn = self._db()
         try:
-            date_expr = "date(replace(substr(published_at, 1, 10), '.', '-'))"
+            date_expr = "date(a.published_at)"
             if since_date:
                 where = f"{date_expr} > date(?)"
                 params = [since_date]
@@ -707,14 +707,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 END
             """
 
-            total = conn.execute(f"SELECT COUNT(*) FROM articles WHERE {where}", params).fetchone()[0]
+            total = conn.execute(f"SELECT COUNT(*) FROM articles a WHERE {where}", params).fetchone()[0]
             rows = conn.execute(
                 f"""
                 SELECT
-                    COALESCE(organization, '(기관 없음)') AS org,
+                    COALESCE(a.organization, '(기관 없음)') AS org,
                     {type_case} AS type_label,
                     COUNT(*) AS cnt
-                FROM articles
+                FROM articles a
                 WHERE {where}
                 GROUP BY org, type_label
                 ORDER BY cnt DESC, org ASC
