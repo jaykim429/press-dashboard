@@ -33,7 +33,7 @@ env.bak/
 venv.bak/
 
 # Project Specific Database and Secrets
-press_unified.db
+press_unified.db*
 service_key.txt
 service_key.txt.example
 logs/
