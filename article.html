@@ -497,7 +497,7 @@
             const pct = Math.round(Number(it.similarity || 0));
             return `<li>
               <a href="/article?id=${it.id}">${title}</a>
-              <div class="similar-meta">${org} · ${date} · 유사도 ${pct}%</div>
+              <div class="similar-meta">${org} · ${date}</div>
             </li>`;
           }).join("");
         } catch (_) {
