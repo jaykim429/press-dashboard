@@ -260,7 +260,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         to_date = (qs.get("to_date", [""])[0] or "").strip()
         sort_order = (qs.get("sort_order", ["desc"])[0] or "desc").strip().lower()
 
-        where_sql, params = self._build_article_where(
+        from_expr, where_sql, params = self._build_query_parts(
             title_q=title_q,
             press_type=press_type,
             organization=organization,
@@ -270,48 +270,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         conn = self._db()
         try:
-            # FTS5 path: fetch matched rows directly from SQLite
-            if title_q:
-                # Clean query for FTS MATCH
-                clean_q = re.sub(r'[^\w\s]', ' ', title_q).strip()
-                if not clean_q:
-                    self._json_response({"page": page, "page_size": page_size, "total": 0, "items": []})
-                    return
+            total = conn.execute(f"SELECT COUNT(*) {from_expr} {where_sql}", params).fetchone()[0]
 
-                # Need count separately for FTS
-                count_sql = "SELECT COUNT(*) FROM articles_fts WHERE articles_fts MATCH ?"
-                total = conn.execute(count_sql, (clean_q,)).fetchone()[0]
-
-                data_sql = f"""
-                    SELECT
-                        a.id, a.source_system, a.source_channel, a.source_item_id,
-                        a.title, a.published_at, a.organization, a.department,
-                        a.original_url, a.detail_url,
-                        (SELECT COUNT(*) FROM attachments at WHERE at.article_id = a.id) AS attachment_count,
-                        bm25(articles_fts) as rank
-                    FROM articles a
-                    JOIN articles_fts f ON a.id = f.rowid
-                    {where_sql.replace("WHERE", "AND") if where_sql else ""}
-                    WHERE articles_fts MATCH ?
-                    ORDER BY rank
-                    LIMIT ? OFFSET ?
-                """
-                rows = conn.execute(data_sql, params + [clean_q, page_size, offset]).fetchall()
-                self._json_response({"page": page, "page_size": page_size, "total": total, "items": [dict(r) for r in rows]})
-                return
-
-            # Default path: date-sorted SQL
-            total = conn.execute(f"SELECT COUNT(*) FROM articles {where_sql}", params).fetchone()[0]
             order_dir = "ASC" if sort_order == "asc" else "DESC"
+            
+            # If search query exists, FTS rank is available and should be the primary sort
+            clean_q = re.sub(r'[^\w\s]', ' ', title_q).strip()
+            if clean_q:
+                order_clause = f"ORDER BY bm25(f.articles_fts), a.published_at {order_dir}, a.id {order_dir}"
+            else:
+                order_clause = f"ORDER BY a.published_at {order_dir}, a.id {order_dir}"
+
             data_sql = f"""
                 SELECT
                     a.id, a.source_system, a.source_channel, a.source_item_id,
                     a.title, a.published_at, a.organization, a.department,
                     a.original_url, a.detail_url,
                     (SELECT COUNT(*) FROM attachments at WHERE at.article_id = a.id) AS attachment_count
-                FROM articles a
+                {from_expr}
                 {where_sql}
-                ORDER BY COALESCE(replace(substr(a.published_at, 1, 10), '.', '-'), '') {order_dir}, a.id {order_dir}
+                {order_clause}
                 LIMIT ? OFFSET ?
             """
             rows = conn.execute(data_sql, params + [page_size, offset]).fetchall()
@@ -339,22 +317,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return re.findall(r"[\uac00-\ud7a3a-zA-Z0-9]+", (text or "").lower())
 
 
-    def _build_article_where(self, title_q="", press_type="", organization="", from_date="", to_date=""):
+    def _build_query_parts(self, title_q="", press_type="", organization="", from_date="", to_date=""):
         where = []
         params = []
+        join_sql = ""
 
         if title_q:
-            where.append("(title LIKE ? OR content_text LIKE ?)")
-            like = f"%{title_q}%"
-            params.extend([like, like])
+            clean_q = re.sub(r'[^\w\s]', ' ', title_q).strip()
+            if clean_q:
+                join_sql = "JOIN articles_fts f ON a.id = f.rowid"
+                where.append("f.articles_fts MATCH ?")
+                params.append(clean_q)
+                
         if press_type == "press_release":
-            where.append("source_channel IN (?, ?, ?, ?)")
+            where.append("a.source_channel IN (?, ?, ?, ?)")
             params.extend(["korea_policy_briefing_press_release", "fss_press_release", "ksd_press_release", "bok_press_release"])
         elif press_type == "press_explainer":
-            where.append("source_channel IN (?, ?)")
+            where.append("a.source_channel IN (?, ?)")
             params.extend(["fss_press_explainer", "fsc_press_explainer"])
         elif press_type == "rule_change_notice":
-            where.append("source_channel IN (?, ?, ?, ?)")
+            where.append("a.source_channel IN (?, ?, ?, ?)")
             params.extend(
                 [
                     "fsc_rule_change_notice",
@@ -364,7 +346,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 ]
             )
         elif press_type == "recent_rule_change_info":
-            where.append("source_channel IN (?, ?, ?)")
+            where.append("a.source_channel IN (?, ?, ?)")
             params.extend(
                 [
                     "fsc_regulation_notice",
@@ -373,24 +355,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 ]
             )
         elif press_type == "admin_guidance_notice":
-            where.append("source_channel IN (?, ?)")
+            where.append("a.source_channel IN (?, ?)")
             params.extend(["fsc_admin_guidance_notice", "fss_admin_guidance_notice"])
         elif press_type == "admin_guidance_enforcement":
-            where.append("source_channel IN (?, ?)")
+            where.append("a.source_channel IN (?, ?)")
             params.extend(["fsc_admin_guidance_enforcement", "fss_admin_guidance_enforcement"])
         elif press_type == "law_interpretation":
-            where.append("source_channel = ?")
+            where.append("a.source_channel = ?")
             params.append("fsc_law_interpretation")
         elif press_type == "no_action_opinion":
-            where.append("source_channel = ?")
+            where.append("a.source_channel = ?")
             params.append("fsc_no_action_opinion")
         elif press_type == "other_data":
-            where.append("source_channel IN (?, ?)")
+            where.append("a.source_channel IN (?, ?)")
             params.extend(["kfb_publicdata_other", "fsec_bbs_222"])
         if organization:
-            where.append("organization = ?")
+            where.append("a.organization = ?")
             params.append(organization)
-        normalized_date_expr = "date(replace(substr(published_at, 1, 10), '.', '-'))"
+        normalized_date_expr = "date(substr(a.published_at, 1, 10))"
         if from_date and to_date:
             where.append(f"{normalized_date_expr} BETWEEN date(?) AND date(?)")
             params.extend([from_date, to_date])
@@ -401,8 +383,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             where.append(f"{normalized_date_expr} <= date(?)")
             params.append(to_date)
 
+        from_expr = "FROM articles a " + join_sql
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-        return where_sql, params
+        return from_expr, where_sql, params
 
     def handle_stats(self, qs):
         title_q = (qs.get("q", [""])[0] or "").strip()
@@ -412,7 +395,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         to_date = (qs.get("to_date", [""])[0] or "").strip()
         top_n = min(20, max(3, to_int(qs.get("top_n", ["8"])[0], 8)))
 
-        where_sql, params = self._build_article_where(
+        from_expr, where_sql, params = self._build_query_parts(
             title_q=title_q,
             press_type=press_type,
             organization=organization,
@@ -422,28 +405,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         type_case = """
             CASE
-                WHEN source_channel IN ('fsc_admin_guidance_notice', 'fss_admin_guidance_notice') THEN 'admin_guidance_notice'
-                WHEN source_channel IN ('fsc_admin_guidance_enforcement', 'fss_admin_guidance_enforcement') THEN 'admin_guidance_enforcement'
-                WHEN source_channel = 'fsc_law_interpretation' THEN 'law_interpretation'
-                WHEN source_channel = 'fsc_no_action_opinion' THEN 'no_action_opinion'
-                WHEN source_channel IN ('fss_press_explainer', 'fsc_press_explainer') THEN 'press_explainer'
-                WHEN source_channel IN ('fsc_rule_change_notice', 'ksd_rule_change_notice', 'krx_rule_change_notice', 'kofia_rule_change_notice') THEN 'rule_change_notice'
-                WHEN source_channel IN ('fsc_regulation_notice', 'krx_recent_rule_change', 'kofia_recent_rule_change') THEN 'recent_rule_change_info'
-                WHEN source_channel IN ('kfb_publicdata_other', 'fsec_bbs_222') THEN 'other_data'
+                WHEN a.source_channel IN ('fsc_admin_guidance_notice', 'fss_admin_guidance_notice') THEN 'admin_guidance_notice'
+                WHEN a.source_channel IN ('fsc_admin_guidance_enforcement', 'fss_admin_guidance_enforcement') THEN 'admin_guidance_enforcement'
+                WHEN a.source_channel = 'fsc_law_interpretation' THEN 'law_interpretation'
+                WHEN a.source_channel = 'fsc_no_action_opinion' THEN 'no_action_opinion'
+                WHEN a.source_channel IN ('fss_press_explainer', 'fsc_press_explainer') THEN 'press_explainer'
+                WHEN a.source_channel IN ('fsc_rule_change_notice', 'ksd_rule_change_notice', 'krx_rule_change_notice', 'kofia_rule_change_notice') THEN 'rule_change_notice'
+                WHEN a.source_channel IN ('fsc_regulation_notice', 'krx_recent_rule_change', 'kofia_recent_rule_change') THEN 'recent_rule_change_info'
+                WHEN a.source_channel IN ('kfb_publicdata_other', 'fsec_bbs_222') THEN 'other_data'
                 ELSE 'press_release'
             END
         """
 
         conn = self._db()
         try:
-            total = conn.execute(f"SELECT COUNT(*) FROM articles {where_sql}", params).fetchone()[0]
+            total = conn.execute(f"SELECT COUNT(*) {from_expr} {where_sql}", params).fetchone()[0]
 
             org_rows = conn.execute(
                 f"""
-                SELECT COALESCE(organization, '(誘몄???') AS organization, COUNT(*) AS cnt
-                FROM articles
+                SELECT COALESCE(a.organization, '(미상)') AS organization, COUNT(*) AS cnt
+                {from_expr}
                 {where_sql}
-                GROUP BY COALESCE(organization, '(誘몄???')
+                GROUP BY COALESCE(a.organization, '(미상)')
                 ORDER BY cnt DESC, organization ASC
                 LIMIT ?
                 """,
@@ -453,7 +436,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             type_rows = conn.execute(
                 f"""
                 SELECT {type_case} AS press_type, COUNT(*) AS cnt
-                FROM articles
+                {from_expr}
                 {where_sql}
                 GROUP BY {type_case}
                 ORDER BY
@@ -588,51 +571,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json_response({"error": "article not found"}, status=404)
                 return
 
-            rows = conn.execute(
-                """
-                SELECT id, title, published_at, organization, source_channel
-                FROM articles
-                WHERE id <> ?
-                  AND title IS NOT NULL
-                  AND trim(title) <> ''
-                  AND (organization = ? OR source_channel = ?)
-                ORDER BY id DESC
-                LIMIT 500
-                """,
-                (article_id, target["organization"], target["source_channel"]),
-            ).fetchall()
-
             target_title = target["title"] or ""
             target_tokens = self._title_tokens(target_title)
+            
+            if not target_tokens:
+                self._json_response({"id": article_id, "items": []})
+                return
+            
+            # Construct FTS MATCH OR query
+            match_query = " OR ".join([f'"{tok}"' for tok in set(target_tokens)])
+            
+            rows = conn.execute(
+                """
+                SELECT a.id, a.title, a.published_at, a.organization, a.source_channel, bm25(f.articles_fts) as rank
+                FROM articles a
+                JOIN articles_fts f ON a.id = f.rowid
+                WHERE f.articles_fts MATCH ?
+                  AND a.id <> ?
+                  AND (a.organization = ? OR a.source_channel = ?)
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (match_query, article_id, target["organization"], target["source_channel"], limit),
+            ).fetchall()
+
             scored = []
-            fallback = []
             for row in rows:
-                cand_title = row["title"] or ""
-                cand_tokens = self._title_tokens(cand_title)
-                score = self._title_similarity(target_title, target_tokens, cand_title, cand_tokens)
                 item = dict(row)
-                if score > 0:
-                    item["similarity"] = round(score, 4)
-                    scored.append(item)
-                    continue
+                item["similarity"] = round(row["rank"], 4)
+                scored.append(item)
 
-                # Fallback candidate: keep raw score without hard threshold filtering.
-                raw = self._title_similarity(target_title, target_tokens, cand_title, cand_tokens, apply_threshold=False)
-                if raw > 0:
-                    item["similarity"] = round(raw, 4)
-                    fallback.append(item)
-
-            scored.sort(key=lambda x: x["similarity"], reverse=True)
-            if not scored:
-                fallback.sort(key=lambda x: x["similarity"], reverse=True)
-                # Ensure UX does not end up empty for terse/unique titles.
-                scored = fallback[:limit]
-            self._json_response(
-                {
-                    "id": article_id,
-                    "items": scored[:limit],
-                }
-            )
+            self._json_response({
+                "id": article_id,
+                "items": scored
+            })
         finally:
             conn.close()
 
@@ -677,28 +649,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return score if score >= 0.16 else 0.0
 
     def handle_keywords(self, qs):
-        top_n = max(5, min(20, to_int((qs.get("top_n", ["12"])[0] or "12"), 12)))
-
-        # "?ㅻ뒛???ㅼ썙??????긽 ?ㅻ뒛 諛쒗뻾 ?곗씠?곕쭔 湲곗??쇰줈 怨꾩궛?쒕떎.
-        range_key = "today"
-        where_sql = "date(replace(substr(published_at, 1, 10), '.', '-')) = date('now', 'localtime')"
-        label = "?ㅻ뒛"
+        now = time.time()
+        if "keywords" in self._keywords_cache:
+            ts, cached = self._keywords_cache["keywords"]
+            if now - ts < self.CACHE_TTL:
+                self._json_response(cached)
+                return
 
         conn = self._db()
         try:
-            rows = conn.execute(
-                f"""
-                SELECT title, content_text
-                FROM articles
-                WHERE {where_sql}
-                ORDER BY id DESC
-                LIMIT 1200
-                """
-            ).fetchall()
-
-            keywords = self._extract_keywords(rows, top_n=top_n)
-            payload = {"range": range_key, "label": label, "items": keywords}
-            self._keywords_cache[cache_key] = (now, payload)
+            # Check if precomputed table exists and has data
+            try:
+                rows = conn.execute("SELECT keyword, score FROM precomputed_keywords ORDER BY score DESC LIMIT 12").fetchall()
+                if rows:
+                    payload = [{"keyword": r["keyword"], "score": r["score"]} for r in rows]
+                    self._keywords_cache["keywords"] = (now, payload)
+                    self._json_response(payload)
+                    return
+            except sqlite3.OperationalError:
+                pass  # Table might not exist yet if ingest hasn't run
+            
+            # Fallback to empty if not yet precomputed
+            payload = []
+            self._keywords_cache["keywords"] = (now, payload)
             self._json_response(payload)
         finally:
             conn.close()

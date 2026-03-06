@@ -213,16 +213,21 @@ def file_ext_from_name(name: Optional[str]) -> Optional[str]:
     return name.rsplit(".", 1)[-1].lower()
 
 
-def infer_file_name_from_url(file_url: Optional[str]) -> Optional[str]:
+def infer_file_name_from_url(file_url: Optional[str]) -> str:
     if not file_url:
-        return None
-    path = (urlparse(file_url).path or "").strip()
-    if not path or "/" not in path:
-        return None
-    name = unquote(path.rsplit("/", 1)[-1]).strip()
-    if not name or "." not in name:
-        return None
-    return name
+        return "unknown"
+    parsed = urlparse(file_url)
+    path = parsed.path
+    if path.endswith("/"):
+        path = path[:-1]
+    name = path.split("/")[-1]
+    return name if name else "unknown_file"
+
+def normalize_published_date(date_str: Optional[str]) -> Optional[str]:
+    if not date_str:
+        return date_str
+    # E.g. "2026.03.04", "2026-03-04 12:34:56" -> "2026-03-04"
+    return date_str[:10].replace(".", "-").replace("/", "-")
 
 
 def extract_attachments_from_soup(soup: BeautifulSoup, base_url: str, source: str) -> List[Dict[str, Any]]:
@@ -457,7 +462,7 @@ class ArticleRepository:
                 article["source_channel"],
                 article["source_item_id"],
                 article.get("title"),
-                article.get("published_at"),
+                normalize_published_date(article.get("published_at")),
                 article.get("organization"),
                 article.get("department"),
                 article.get("original_url"),
@@ -2784,6 +2789,24 @@ class UnifiedPressIngestService:
                 except Exception as e:
                     print(f"[Error in KOFIA Rule Notice] {e}")
 
+            print("[INFO] Pre-computing analytics (keywords)...")
+            try:
+                from local_dashboard import DashboardHandler
+                rows = conn.execute("SELECT title, content_text FROM articles ORDER BY id DESC LIMIT 1200").fetchall()
+                docs = [{"title": r[0], "content_text": r[1]} for r in rows]
+                keywords = DashboardHandler._extract_keywords(docs, top_n=12)
+                
+                conn.execute("CREATE TABLE IF NOT EXISTS precomputed_keywords (keyword TEXT, score REAL, computed_at TEXT)")
+                conn.execute("DELETE FROM precomputed_keywords")
+                ts = now_iso()
+                for kw in keywords:
+                    conn.execute("INSERT INTO precomputed_keywords (keyword, score, computed_at) VALUES (?, ?, ?)", (kw["keyword"], kw["score"], ts))
+                conn.commit()
+                print("[INFO] Pre-computation complete.")
+            except ImportError as e:
+                print(f"[Warning] Failed to import local_dashboard to precompute keywords: {e}")
+            except Exception as e:
+                print(f"[Error in Analytics Pre-computation] {e}")
 
             summary = repo.fetch_summary()
             latest = repo.fetch_latest(limit=20)
@@ -2857,7 +2880,7 @@ class UnifiedIngestCliApp:
         parser.add_argument(
             "--api-orgs",
             nargs="+",
-            default=["?????", "?????????", "?????"],
+            default=None,
             help="Allowed organizations for API collector",
         )
         return parser
@@ -2916,6 +2939,13 @@ class UnifiedIngestCliApp:
                 no_attr = f"no_{key}"
                 if hasattr(args, no_attr):
                     setattr(args, no_attr, True)
+            
+            if key == "data_go_api" and "api_orgs" in col_cfg:
+                if not getattr(args, "api_orgs", None):
+                    args.api_orgs = col_cfg["api_orgs"]
+
+        if not getattr(args, "api_orgs", None):
+            args.api_orgs = ["금융위원회", "금융감독원", "한국은행", "기획재정부", "재정경제부"]
         validate_dates(args.start_date, args.end_date)
         service = UnifiedPressIngestService(http=self.http)
         options = self.build_options(args)

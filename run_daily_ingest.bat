@@ -35,9 +35,14 @@ if "%SERVICE_KEY%"=="" (
   exit /b 1
 )
 
+for /f "tokens=2 delims=:" %%A in ('findstr "^[ ]*date_window_days:" ingest_config.yaml 2^>nul') do set "WINDOW_DAYS=%%A"
+if not defined WINDOW_DAYS set "WINDOW_DAYS=5"
+rem Trim whitespace from WINDOW_DAYS
+for /f "tokens=* delims= " %%A in ("%WINDOW_DAYS%") do set "WINDOW_DAYS=%%A"
+
 for /f %%i in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyyMMdd_HHmmss')"') do set "TS=%%i"
 for /f %%i in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyyMMdd')"') do set "END_DATE=%%i"
-for /f %%i in ('powershell -NoProfile -Command "(Get-Date).AddDays(-5).ToString('yyyyMMdd')"') do set "START_DATE=%%i"
+for /f %%i in ('powershell -NoProfile -Command "(Get-Date).AddDays(-%WINDOW_DAYS%).ToString('yyyyMMdd')"') do set "START_DATE=%%i"
 
 if not exist "logs" mkdir "logs"
 set "LOG_FILE=logs\ingest_%TS%.log"
