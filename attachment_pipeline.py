@@ -8,26 +8,36 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from typing import Dict, List, Optional
 
 import requests
-from bs4 import BeautifulSoup
 
 try:
     import fcntl  # type: ignore
 except Exception:
     fcntl = None
 
-try:
-    from pypdf import PdfReader  # type: ignore
-except Exception:
-    PdfReader = None
+from document_text_extractor import DocumentTextExtractorService
 
 
 EXTRACTOR_NAME = "attachment_text_extractor"
 EXTRACTOR_VERSION = "1.1.0"
 USER_AGENT = "press-dashboard-attachment-worker/1.1"
+CORE_ANALYSIS_CHANNELS = (
+    "fsc_rule_change_notice",
+    "ksd_rule_change_notice",
+    "krx_rule_change_notice",
+    "kofia_rule_change_notice",
+    "fsc_regulation_notice",
+    "krx_recent_rule_change",
+    "kofia_recent_rule_change",
+    "fsc_admin_guidance_notice",
+    "fss_admin_guidance_notice",
+    "fsc_admin_guidance_enforcement",
+    "fss_admin_guidance_enforcement",
+    "fsc_law_interpretation",
+    "fsc_no_action_opinion",
+)
 
 
 def now_iso() -> str:
@@ -55,6 +65,7 @@ class AttachmentPipelineConfig:
     max_retry: int = 3
     timeout_sec: int = 30
     max_bytes: int = 30 * 1024 * 1024
+    core_only: bool = False
 
 
 class FileLock:
@@ -176,23 +187,45 @@ class AttachmentRepository:
         self.conn.commit()
         return created
 
-    def fetch_candidates(self, batch_size: int, max_retry: int) -> List[sqlite3.Row]:
+    def fetch_candidates(self, batch_size: int, max_retry: int, core_only: bool = False) -> List[sqlite3.Row]:
+        channel_filter = ""
+        if core_only:
+            placeholders = ",".join(["?"] * len(CORE_ANALYSIS_CHANNELS))
+            channel_filter = f" AND ar.source_channel IN ({placeholders})"
+
+        params: List[object] = [max_retry]
+        if core_only:
+            params.extend(CORE_ANALYSIS_CHANNELS)
+        params.append(batch_size)
         return self.conn.execute(
             """
-            SELECT d.id, d.canonical_url, d.url_hash
+            SELECT
+              d.id,
+              d.canonical_url,
+              d.url_hash,
+              MIN(
+                CASE
+                  WHEN ar.source_channel IN (
+                    'fsc_rule_change_notice','ksd_rule_change_notice','krx_rule_change_notice','kofia_rule_change_notice',
+                    'fsc_regulation_notice','krx_recent_rule_change','kofia_recent_rule_change',
+                    'fsc_admin_guidance_notice','fss_admin_guidance_notice',
+                    'fsc_admin_guidance_enforcement','fss_admin_guidance_enforcement',
+                    'fsc_law_interpretation','fsc_no_action_opinion'
+                  ) THEN 0 ELSE 1
+                END
+              ) AS priority_rank
             FROM attachment_documents d
+            JOIN attachments a ON a.document_id = d.id
+            JOIN articles ar ON ar.id = a.article_id
             WHERE (d.download_status='pending' OR d.download_status='failed')
               AND d.retry_count < ?
-              AND EXISTS (
-                SELECT 1
-                FROM attachments a
-                WHERE a.document_id=d.id
-                  AND (a.processing_status='pending' OR a.processing_status='failed' OR a.processing_status IS NULL)
-              )
-            ORDER BY d.last_seen_at DESC, d.id DESC
+              AND (a.processing_status='pending' OR a.processing_status='failed' OR a.processing_status IS NULL)
+              """ + channel_filter + """
+            GROUP BY d.id, d.canonical_url, d.url_hash
+            ORDER BY priority_rank ASC, d.last_seen_at DESC, d.id DESC
             LIMIT ?
             """,
-            (max_retry, batch_size),
+            params,
         ).fetchall()
 
     def mark_document_processing(self, doc_id: int) -> None:
@@ -299,53 +332,20 @@ class AttachmentRepository:
         self.conn.commit()
 
 
-class AttachmentTextExtractor:
-    def infer_ext(self, file_name: Optional[str], url: str, content_type: Optional[str]) -> str:
-        if file_name and "." in file_name:
-            return file_name.rsplit(".", 1)[-1].lower()
-        path = urlparse(url).path
-        if "." in path:
-            return path.rsplit(".", 1)[-1].lower()
-        if content_type:
-            ct = content_type.lower()
-            if "pdf" in ct:
-                return "pdf"
-            if "html" in ct:
-                return "html"
-            if "json" in ct:
-                return "json"
-            if "xml" in ct:
-                return "xml"
-            if "text/plain" in ct:
-                return "txt"
-        return "bin"
-
-    def extract(self, file_path: Path, ext: str) -> Tuple[str, Dict[str, object]]:
-        ext = (ext or "").lower()
-        raw = file_path.read_bytes()
-        meta: Dict[str, object] = {"ext": ext}
-
-        if ext in {"txt", "csv", "log", "json", "xml"}:
-            return raw.decode("utf-8", errors="replace"), meta
-        if ext in {"html", "htm"}:
-            soup = BeautifulSoup(raw.decode("utf-8", errors="replace"), "html.parser")
-            return soup.get_text("\n", strip=True), meta
-        if ext == "pdf":
-            if PdfReader is None:
-                raise RuntimeError("PDF extraction requires pypdf")
-            reader = PdfReader(str(file_path))
-            pages = [(p.extract_text() or "").strip() for p in reader.pages]
-            meta["pages"] = len(reader.pages)
-            return "\n\n".join([p for p in pages if p]), meta
-        raise RuntimeError(f"Unsupported extension: {ext}")
-
-
 class AttachmentPipelineApp:
     def __init__(self, cfg: AttachmentPipelineConfig):
         self.cfg = cfg
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT})
-        self.extractor = AttachmentTextExtractor()
+        self.extractor_service = DocumentTextExtractorService()
+
+    @staticmethod
+    def _looks_like_html(content_type: Optional[str], file_bytes: bytes) -> bool:
+        ct = (content_type or "").lower()
+        if "text/html" in ct or "application/xhtml+xml" in ct:
+            return True
+        head = file_bytes[:1024].decode("utf-8", errors="ignore").lower()
+        return "<html" in head or "<!doctype html" in head
 
     def run(self) -> None:
         lock = FileLock(Path(self.cfg.lock_file))
@@ -358,7 +358,7 @@ class AttachmentPipelineApp:
         created = repo.materialize_documents()
         print(f"[INFO] materialized attachment_documents: {created}")
 
-        candidates = repo.fetch_candidates(self.cfg.batch_size, self.cfg.max_retry)
+        candidates = repo.fetch_candidates(self.cfg.batch_size, self.cfg.max_retry, core_only=self.cfg.core_only)
         print(f"[INFO] candidates: {len(candidates)}")
 
         for doc in candidates:
@@ -386,14 +386,28 @@ class AttachmentPipelineApp:
                     (doc_id,),
                 ).fetchone()
                 file_name = linked[0] if linked else None
-                ext = self.extractor.infer_ext(file_name, url, content_type)
+                ext = self.extractor_service.infer_extension(file_name, url, content_type)
 
                 subdir = Path(self.cfg.download_dir) / dt.datetime.now().strftime("%Y%m%d")
                 subdir.mkdir(parents=True, exist_ok=True)
                 path = subdir / f"{doc['url_hash']}.{ext}"
                 path.write_bytes(file_bytes)
 
-                text, ext_meta = self.extractor.extract(path, ext)
+                outcome = self.extractor_service.extract(path, ext)
+                # If declared extension parsing fails but payload is actually HTML,
+                # retry with HTML extractor so we can still preserve useful text.
+                if not outcome.ok and self._looks_like_html(content_type, file_bytes):
+                    html_path = subdir / f"{doc['url_hash']}.html"
+                    html_path.write_bytes(file_bytes)
+                    html_outcome = self.extractor_service.extract(html_path, "html")
+                    if html_outcome.ok:
+                        outcome = html_outcome
+                        path = html_path
+
+                if not outcome.ok:
+                    raise RuntimeError(outcome.error or f"Extraction failed for ext={ext}")
+
+                text, ext_meta = outcome.text, {"extractor": outcome.extractor, **(outcome.metadata or {})}
                 repo.mark_success(
                     doc_id=doc_id,
                     storage_path=str(path),
@@ -421,6 +435,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-retry", type=int, default=3)
     p.add_argument("--timeout-sec", type=int, default=30)
     p.add_argument("--max-bytes", type=int, default=30 * 1024 * 1024)
+    p.add_argument(
+        "--core-only",
+        action="store_true",
+        help="Process only core analysis channels (rule/admin/law/no-action types)",
+    )
     return p
 
 
@@ -434,6 +453,7 @@ def main() -> None:
         max_retry=args.max_retry,
         timeout_sec=args.timeout_sec,
         max_bytes=args.max_bytes,
+        core_only=args.core_only,
     )
     AttachmentPipelineApp(cfg).run()
 

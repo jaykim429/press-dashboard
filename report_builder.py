@@ -8,6 +8,23 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
+import re
+
+CORE_ANALYSIS_CHANNELS = (
+    "fsc_rule_change_notice",
+    "ksd_rule_change_notice",
+    "krx_rule_change_notice",
+    "kofia_rule_change_notice",
+    "fsc_regulation_notice",
+    "krx_recent_rule_change",
+    "kofia_recent_rule_change",
+    "fsc_admin_guidance_notice",
+    "fss_admin_guidance_notice",
+    "fsc_admin_guidance_enforcement",
+    "fss_admin_guidance_enforcement",
+    "fsc_law_interpretation",
+    "fsc_no_action_opinion",
+)
 
 
 def now_iso() -> str:
@@ -19,12 +36,13 @@ class ReportBuildConfig:
     db_path: str
     from_date: str
     to_date: str
-    topic: str = "금융 규제 동향"
+    topic: str = "financial regulatory trend"
     model_name: str = "external-llm"
     language: str = "ko"
     max_sources: int = 80
     max_chars_per_source: int = 3000
     output_json: str = ""
+    core_only: bool = False
 
 
 class ReportRepository:
@@ -57,6 +75,12 @@ class ReportRepository:
               summary_text TEXT,
               report_markdown TEXT,
               report_json TEXT,
+              llm_status TEXT DEFAULT 'pending',
+              llm_provider TEXT,
+              llm_model TEXT,
+              llm_prompt TEXT,
+              llm_response_raw TEXT,
+              llm_completed_at TEXT,
               created_at TEXT NOT NULL
             )
             """
@@ -79,7 +103,22 @@ class ReportRepository:
         )
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_jobs_status ON report_jobs(status)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_outputs_job ON report_outputs(job_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_outputs_llm_status ON report_outputs(llm_status)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_sources_output ON report_output_sources(report_output_id)")
+        # Forward-compatible migration for existing DBs
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(report_outputs)").fetchall()}
+        if "llm_status" not in cols:
+            self.conn.execute("ALTER TABLE report_outputs ADD COLUMN llm_status TEXT DEFAULT 'pending'")
+        if "llm_provider" not in cols:
+            self.conn.execute("ALTER TABLE report_outputs ADD COLUMN llm_provider TEXT")
+        if "llm_model" not in cols:
+            self.conn.execute("ALTER TABLE report_outputs ADD COLUMN llm_model TEXT")
+        if "llm_prompt" not in cols:
+            self.conn.execute("ALTER TABLE report_outputs ADD COLUMN llm_prompt TEXT")
+        if "llm_response_raw" not in cols:
+            self.conn.execute("ALTER TABLE report_outputs ADD COLUMN llm_response_raw TEXT")
+        if "llm_completed_at" not in cols:
+            self.conn.execute("ALTER TABLE report_outputs ADD COLUMN llm_completed_at TEXT")
         self.conn.commit()
 
     def create_job(self, cfg: ReportBuildConfig) -> int:
@@ -118,6 +157,14 @@ class ReportRepository:
         self.conn.commit()
 
     def query_sources(self, cfg: ReportBuildConfig) -> List[Dict[str, Any]]:
+        channel_filter = ""
+        params: List[Any] = [cfg.from_date, cfg.to_date]
+        if cfg.core_only:
+            placeholders = ",".join(["?"] * len(CORE_ANALYSIS_CHANNELS))
+            channel_filter = f" AND a.source_channel IN ({placeholders})"
+            params.extend(CORE_ANALYSIS_CHANNELS)
+        params.append(cfg.max_sources * 4)
+
         rows = self.conn.execute(
             """
             SELECT
@@ -128,6 +175,8 @@ class ReportRepository:
               a.source_channel,
               a.content_text,
               at.id AS attachment_id,
+              at.file_name,
+              at.file_ext,
               d.id AS document_id,
               e.id AS extraction_id,
               e.text_content AS extraction_text
@@ -136,13 +185,56 @@ class ReportRepository:
             LEFT JOIN attachment_documents d ON d.id = at.document_id
             LEFT JOIN attachment_extractions e ON e.document_id = d.id AND e.status = 'success'
             WHERE date(substr(a.published_at,1,10)) BETWEEN date(?) AND date(?)
+            """ + channel_filter + """
             ORDER BY date(substr(a.published_at,1,10)) DESC, a.id DESC
             LIMIT ?
             """,
-            (cfg.from_date, cfg.to_date, cfg.max_sources),
+            params,
         ).fetchall()
-        out: List[Dict[str, Any]] = []
+
+        def _norm_title(name: Any) -> str:
+            text = (name or "").strip().lower()
+            text = re.sub(r"\s+", " ", text)
+            text = re.sub(r"\.(pdf|hwpx|hwp|docx|doc|xlsx|xls|pptx|ppt|zip|txt)$", "", text)
+            return text
+
+        def _ext_rank(ext: Any) -> int:
+            e = (ext or "").strip().lower().lstrip(".")
+            ranks = {
+                "pdf": 1,
+                "hwpx": 2,
+                "hwp": 3,
+                "docx": 4,
+                "doc": 5,
+                "xlsx": 6,
+                "xls": 7,
+                "pptx": 8,
+                "ppt": 9,
+                "txt": 10,
+                "zip": 11,
+            }
+            return ranks.get(e, 99)
+
+        # Dedup attachments per article/title with ext priority for LLM input.
+        picked: Dict[tuple, sqlite3.Row] = {}
         for r in rows:
+            att_id = r["attachment_id"]
+            if att_id is None:
+                key = (r["article_id"], "__article_body__")
+                if key not in picked:
+                    picked[key] = r
+                continue
+
+            key = (r["article_id"], _norm_title(r["file_name"]) or f"att_{att_id}")
+            existing = picked.get(key)
+            if existing is None:
+                picked[key] = r
+            else:
+                if _ext_rank(r["file_ext"]) < _ext_rank(existing["file_ext"]):
+                    picked[key] = r
+
+        out: List[Dict[str, Any]] = []
+        for r in picked.values():
             article_text = (r["content_text"] or "")[: cfg.max_chars_per_source]
             attachment_text = (r["extraction_text"] or "")[: cfg.max_chars_per_source]
             merged = article_text
@@ -161,14 +253,16 @@ class ReportRepository:
                     "text": merged,
                 }
             )
-        return out
+        # Keep deterministic order and cap final payload.
+        out.sort(key=lambda x: (x["published_at"] or "", x["article_id"]), reverse=True)
+        return out[: cfg.max_sources]
 
     def create_output(self, job_id: int, title: str, summary: str, markdown: str, report_json: Dict[str, Any]) -> int:
         ts = now_iso()
         self.conn.execute(
             """
-            INSERT INTO report_outputs (job_id, title, summary_text, report_markdown, report_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO report_outputs (job_id, title, summary_text, report_markdown, report_json, llm_status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?)
             """,
             (job_id, title, summary, markdown, json.dumps(report_json, ensure_ascii=False), ts),
         )
@@ -207,9 +301,9 @@ class ReportPayloadBuilder:
             "language": cfg.language,
             "topic": cfg.topic,
             "instructions": [
-                "요약 보고서를 작성하되, 주장마다 출처(source_index)를 명시한다.",
-                "핵심 변화, 영향, 리스크, 후속 액션을 분리해 작성한다.",
-                "추정/불확실 정보는 명시적으로 표기한다.",
+                "Write the report in Markdown and cite source_index for each claim.",
+                "Separate sections for key changes, impact analysis, risks, and action plan.",
+                "Mark uncertain items explicitly as assumptions and note weak evidence.",
             ],
             "sources": [
                 {
@@ -230,16 +324,15 @@ class ReportPayloadBuilder:
 
     def build_markdown_template(self, cfg: ReportBuildConfig) -> str:
         return (
-            f"# {cfg.topic} 보고서 초안\n\n"
-            f"- 기간: {cfg.from_date} ~ {cfg.to_date}\n"
-            "- 생성 방식: LLM 입력용 초안 패키지\n\n"
-            "## 1. 핵심 요약\n\n"
-            "## 2. 주요 제도/정책 변화\n\n"
-            "## 3. 영향 분석\n\n"
-            "## 4. 리스크 및 모니터링 포인트\n\n"
-            "## 5. 실행 권고안\n"
+            f"# {cfg.topic} report draft\n\n"
+            f"- period: {cfg.from_date} ~ {cfg.to_date}\n"
+            "- generation mode: LLM input package\n\n"
+            "## 1. executive summary\n\n"
+            "## 2. key policy changes\n\n"
+            "## 3. impact analysis\n\n"
+            "## 4. risk and monitoring points\n\n"
+            "## 5. recommended actions\n"
         )
-
 
 class ReportBuilderApp:
     def __init__(self, cfg: ReportBuildConfig):
@@ -259,7 +352,7 @@ class ReportBuilderApp:
             summary = f"sources={len(sources)} / period={self.cfg.from_date}..{self.cfg.to_date}"
             output_id = repo.create_output(
                 job_id=job_id,
-                title=f"{self.cfg.topic} 보고서 입력 패키지",
+                title=f"{self.cfg.topic} report input package",
                 summary=summary,
                 markdown=markdown,
                 report_json=payload,
@@ -286,12 +379,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db-path", default="press_unified.db")
     parser.add_argument("--from-date", required=True, help="YYYY-MM-DD")
     parser.add_argument("--to-date", required=True, help="YYYY-MM-DD")
-    parser.add_argument("--topic", default="금융 규제 동향")
+    parser.add_argument("--topic", default="financial regulatory trend")
     parser.add_argument("--model-name", default="external-llm")
     parser.add_argument("--language", default="ko")
     parser.add_argument("--max-sources", type=int, default=80)
     parser.add_argument("--max-chars-per-source", type=int, default=3000)
     parser.add_argument("--output-json", default="")
+    parser.add_argument(
+        "--core-only",
+        action="store_true",
+        help="Include only core analysis channels (rule/admin/law/no-action types)",
+    )
+    parser.add_argument(
+        "--all-channels",
+        action="store_true",
+        help="Backward-compatible flag to disable --core-only filtering",
+    )
     return parser
 
 
@@ -307,6 +410,7 @@ def main() -> None:
         max_sources=args.max_sources,
         max_chars_per_source=args.max_chars_per_source,
         output_json=args.output_json,
+        core_only=(args.core_only and not args.all_channels),
     )
     result = ReportBuilderApp(cfg).run()
     print(json.dumps(result, ensure_ascii=False))
@@ -314,3 +418,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

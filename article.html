@@ -192,6 +192,29 @@
     }
     .att-list a:hover { text-decoration: underline; }
 
+    .report-card { margin-top: 24px; }
+    .report-meta {
+      margin-bottom: 10px;
+      font-size: 12px;
+      color: var(--gray-060);
+    }
+    .report-body {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-s);
+      background: var(--surface);
+      padding: 14px;
+      white-space: pre-wrap;
+      line-height: 1.75;
+      font-size: 14px;
+      color: #1f2937;
+      max-height: 460px;
+      overflow: auto;
+    }
+    .report-empty {
+      color: var(--gray-060);
+      font-size: 14px;
+    }
+
     /* Similar */
     .similar-list { list-style: none; }
     .similar-list li { border-bottom: 1px solid var(--border); padding: 12px 0; }
@@ -268,6 +291,11 @@
           <div style="margin-top:24px;">
             <h2 class="section-title">첨부 자료</h2>
             <ul class="att-list" id="attList"></ul>
+          </div>
+
+          <div class="report-card" id="llmReportWrap">
+            <h2 class="section-title">연결 보고서</h2>
+            <div class="report-empty">연결된 보고서를 확인하는 중입니다...</div>
           </div>
         </div>
       </div>
@@ -391,6 +419,7 @@
           content: document.getElementById("content"),
           attList: document.getElementById("attList"),
           similarList: document.getElementById("similarList"),
+          llmReportWrap: document.getElementById("llmReportWrap"),
         };
       }
 
@@ -404,6 +433,7 @@
           if (!res.ok) { this.showError(`상세 조회 실패 (${res.status})`); return; }
           const data = await res.json();
           this.render(data);
+          await this.renderLinkedReport(id);
           await this.renderSimilar(id);
         } catch (err) {
           this.showError(`상세 조회 중 오류가 발생했습니다. (${TextUtil.safe(err.message)})`);
@@ -478,6 +508,39 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             ${name}</a></li>`;
         }).join("");
+      }
+
+      async renderLinkedReport(articleId) {
+        try {
+          const res = await fetch(`/api/article-report?id=${encodeURIComponent(articleId)}`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          const item = data.item;
+          if (!item || !item.report_markdown) {
+            this.el.llmReportWrap.innerHTML = `
+              <h2 class="section-title">연결 보고서</h2>
+              <div class="report-empty">이 자료에 연결된 생성 보고서가 아직 없습니다.</div>
+            `;
+            return;
+          }
+
+          const title = TextUtil.safe(item.title || "생성 보고서");
+          const done = TextUtil.safe(DateUtil.onlyDate(item.llm_completed_at || item.created_at || ""));
+          const provider = TextUtil.safe(item.llm_provider || "-");
+          const model = TextUtil.safe(item.llm_model || "-");
+          const srcCount = Number(item.source_count || 0).toLocaleString();
+          const body = TextUtil.safe(item.report_markdown || "");
+          this.el.llmReportWrap.innerHTML = `
+            <h2 class="section-title">연결 보고서</h2>
+            <div class="report-meta">${title} · ${done} · ${provider}/${model} · 근거 ${srcCount}건</div>
+            <div class="report-body">${body}</div>
+          `;
+        } catch (_) {
+          this.el.llmReportWrap.innerHTML = `
+            <h2 class="section-title">연결 보고서</h2>
+            <div class="report-empty">보고서를 불러오지 못했습니다.</div>
+          `;
+        }
       }
 
       async renderSimilar(articleId) {

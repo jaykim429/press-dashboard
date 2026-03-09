@@ -30,6 +30,7 @@ echo "[INFO] Log file: $LOG_FILE"
   --download-dir "attachment_store" \
   --batch-size 120 \
   --max-retry 3 \
+  ${ATTACH_CORE_ONLY:+--core-only} \
   > "$LOG_FILE" 2>&1
 
 EXIT_CODE=$?
