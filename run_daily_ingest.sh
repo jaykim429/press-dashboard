@@ -61,6 +61,12 @@ COMMON_ARGS=(
   --db-path "$DB_PATH"
   --config "ingest_config.yaml"
 )
+EXTRA_ARGS=()
+if [ "${FAIL_ON_COLLECTOR_ERROR:-1}" = "1" ]; then
+  EXTRA_ARGS+=(--fail-on-collector-error)
+fi
+EXTRA_ARGS+=(--collector-retry-attempts "${COLLECTOR_RETRY_ATTEMPTS:-2}")
+EXTRA_ARGS+=(--collector-retry-backoff-sec "${COLLECTOR_RETRY_BACKOFF_SEC:-2.0}")
 
 echo "[INFO] Ingest start: ${START_DATE} ~ ${END_DATE}"
 echo "[INFO] Main log file: ${MAIN_LOG_FILE}"
@@ -71,6 +77,7 @@ run_collector_step() {
   echo "[INFO] Running collector: ${collector_key}"
   PYTHONUNBUFFERED=1 "$PYTHON_BIN" unified_press_ingest.py \
     "${COMMON_ARGS[@]}" \
+    "${EXTRA_ARGS[@]}" \
     --only-collector "$collector_key" \
     --skip-analytics \
     --preview-json "ingest_preview_${collector_key}.json" \
@@ -124,6 +131,7 @@ if [ "$RUN_SPLIT_COLLECTORS" = "1" ]; then
   echo "[INFO] Running final analytics pre-computation..."
   PYTHONUNBUFFERED=1 "$PYTHON_BIN" unified_press_ingest.py \
     "${COMMON_ARGS[@]}" \
+    "${EXTRA_ARGS[@]}" \
     --analytics-only \
     --preview-json "ingest_preview_daily.json" \
     > "$ANALYTICS_LOG" 2>&1
@@ -137,6 +145,7 @@ if [ "$RUN_SPLIT_COLLECTORS" = "1" ]; then
 else
   PYTHONUNBUFFERED=1 "$PYTHON_BIN" unified_press_ingest.py \
     "${COMMON_ARGS[@]}" \
+    "${EXTRA_ARGS[@]}" \
     --preview-json "ingest_preview_daily.json" \
     > "$MAIN_LOG_FILE" 2>&1
   EXIT_CODE=$?

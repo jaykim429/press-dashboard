@@ -2785,6 +2785,8 @@ class IngestRunOptions:
     fss_admin_max_pages: int = 1
     api_orgs: Optional[Sequence[str]] = None
     precompute_analytics: bool = True
+    collector_retry_attempts: int = 2
+    collector_retry_backoff_sec: float = 2.0
 
 
 class UnifiedPressIngestService:
@@ -2843,153 +2845,141 @@ class UnifiedPressIngestService:
             source_counts: Dict[str, int] = {}
 
 
-            if options.include_api:
-                try:
-                    api_items = self.api_collector.ingest(
-                        service_key=options.service_key,
-                        start_date=options.start_date,
-                        end_date=options.end_date,
-                        allowed_orgs=options.api_orgs,
-                    )
-                    source_counts["data_go_api"] = len(api_items)
-                    total_articles += self._persist(repo, api_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in DataGoAPI] {e}")
+            collector_errors: Dict[str, str] = {}
 
-            if options.include_fss:
-                try:
-                    fss_items = self.fss_collector.ingest(max_pages_each=options.fss_max_pages)
-                    source_counts["fss_scrape"] = len(fss_items)
-                    total_articles += self._persist(repo, fss_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in FSS] {e}")
+            def run_collector(
+                label: str,
+                source_key: str,
+                enabled: bool,
+                fetch_fn: Any,
+            ) -> None:
+                nonlocal total_articles
+                if not enabled:
+                    return
 
-            if options.include_fss_admin:
-                try:
-                    fss_admin_items = self.fss_admin_collector.ingest(max_pages=options.fss_admin_max_pages)
-                    source_counts["fss_admin_scrape"] = len(fss_admin_items)
-                    total_articles += self._persist(repo, fss_admin_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in FSS Admin] {e}")
+                attempts = max(1, int(options.collector_retry_attempts))
+                base_wait = max(0.0, float(options.collector_retry_backoff_sec))
+                last_exc: Optional[Exception] = None
 
-            if options.include_ksd:
-                try:
-                    ksd_items = self.ksd_collector.ingest(max_pages=options.ksd_max_pages)
-                    source_counts["ksd_scrape"] = len(ksd_items)
-                    total_articles += self._persist(repo, ksd_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in KSD] {e}")
+                for attempt in range(1, attempts + 1):
+                    try:
+                        items = fetch_fn()
+                        source_counts[source_key] = len(items)
+                        total_articles += self._persist(repo, items)
+                        conn.commit()
+                        if attempt > 1:
+                            print(f"[INFO] {label} recovered on retry attempt {attempt}/{attempts}")
+                        return
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt < attempts:
+                            wait_sec = base_wait * attempt
+                            print(
+                                f"[WARN] {label} attempt {attempt}/{attempts} failed: {exc}. "
+                                f"Retrying in {wait_sec:.1f}s"
+                            )
+                            if wait_sec > 0:
+                                time.sleep(wait_sec)
+                            continue
 
-            if options.include_ksd_rule:
-                try:
-                    ksd_rule_items = self.ksd_rule_collector.ingest(max_pages=options.ksd_rule_max_pages)
-                    source_counts["ksd_rule_scrape"] = len(ksd_rule_items)
-                    total_articles += self._persist(repo, ksd_rule_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in KSD Rule] {e}")
+                collector_errors[label] = str(last_exc) if last_exc is not None else "unknown error"
+                print(f"[Error in {label}] {last_exc}")
 
-            if options.include_fsc:
-                try:
-                    fsc_items = self.fsc_collector.ingest(max_pages_each=options.fsc_max_pages)
-                    source_counts["fsc_scrape"] = len(fsc_items)
-                    total_articles += self._persist(repo, fsc_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in FSC] {e}")
-
-            if options.include_fsc_admin:
-                try:
-                    fsc_admin_items = self.fsc_admin_collector.ingest(max_pages=options.fsc_admin_max_pages)
-                    source_counts["fsc_admin_scrape"] = len(fsc_admin_items)
-                    total_articles += self._persist(repo, fsc_admin_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in FSC Admin] {e}")
-
-            if options.include_fsc_reply:
-                try:
-                    fsc_reply_items = self.fsc_reply_collector.ingest(max_pages=options.fsc_reply_max_pages)
-                    source_counts["fsc_reply_scrape"] = len(fsc_reply_items)
-                    total_articles += self._persist(repo, fsc_reply_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in FSC ReplyCase] {e}")
-                    
-            if options.include_bok:
-                try:
-                    bok_items = self.bok_collector.ingest(max_pages=options.bok_max_pages)
-                    source_counts["bok_scrape"] = len(bok_items)
-                    total_articles += self._persist(repo, bok_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in BOK] {e}")
-
-            if options.include_kfb:
-                try:
-                    kfb_items = self.kfb_collector.ingest(max_pages=options.kfb_max_pages)
-                    source_counts["kfb_scrape"] = len(kfb_items)
-                    total_articles += self._persist(repo, kfb_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in KFB] {e}")
-
-            if options.include_fsec:
-                try:
-                    fsec_items = self.fsec_collector.ingest(max_pages=options.fsec_max_pages)
-                    source_counts["fsec_scrape"] = len(fsec_items)
-                    total_articles += self._persist(repo, fsec_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in FSEC] {e}")
-
-            if options.include_krx_recent:
-                try:
-                    krx_recent_items = self.krx_collector.ingest_recent_rule_changes(
-                        max_pages=options.krx_recent_max_pages
-                    )
-                    source_counts["krx_recent_scrape"] = len(krx_recent_items)
-                    total_articles += self._persist(repo, krx_recent_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in KRX Recent Rules] {e}")
-
-            if options.include_krx_notice:
-                try:
-                    krx_notice_items = self.krx_collector.ingest_rule_change_notices(
-                        max_pages=options.krx_notice_max_pages
-                    )
-                    source_counts["krx_notice_scrape"] = len(krx_notice_items)
-                    total_articles += self._persist(repo, krx_notice_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in KRX Rule Notice] {e}")
-
-            if options.include_kofia_recent:
-                try:
-                    kofia_recent_items = self.kofia_collector.ingest_recent_rule_changes(
-                        max_pages=options.kofia_recent_max_pages
-                    )
-                    source_counts["kofia_recent_scrape"] = len(kofia_recent_items)
-                    total_articles += self._persist(repo, kofia_recent_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in KOFIA Recent Rules] {e}")
-
-            if options.include_kofia_notice:
-                try:
-                    kofia_notice_items = self.kofia_collector.ingest_rule_change_notices(
-                        max_pages=options.kofia_notice_max_pages
-                    )
-                    source_counts["kofia_notice_scrape"] = len(kofia_notice_items)
-                    total_articles += self._persist(repo, kofia_notice_items)
-                    conn.commit()
-                except Exception as e:
-                    print(f"[Error in KOFIA Rule Notice] {e}")
+            run_collector(
+                label="DataGoAPI",
+                source_key="data_go_api",
+                enabled=options.include_api,
+                fetch_fn=lambda: self.api_collector.ingest(
+                    service_key=options.service_key,
+                    start_date=options.start_date,
+                    end_date=options.end_date,
+                    allowed_orgs=options.api_orgs,
+                ),
+            )
+            run_collector(
+                label="FSS",
+                source_key="fss_scrape",
+                enabled=options.include_fss,
+                fetch_fn=lambda: self.fss_collector.ingest(max_pages_each=options.fss_max_pages),
+            )
+            run_collector(
+                label="FSS Admin",
+                source_key="fss_admin_scrape",
+                enabled=options.include_fss_admin,
+                fetch_fn=lambda: self.fss_admin_collector.ingest(max_pages=options.fss_admin_max_pages),
+            )
+            run_collector(
+                label="KSD",
+                source_key="ksd_scrape",
+                enabled=options.include_ksd,
+                fetch_fn=lambda: self.ksd_collector.ingest(max_pages=options.ksd_max_pages),
+            )
+            run_collector(
+                label="KSD Rule",
+                source_key="ksd_rule_scrape",
+                enabled=options.include_ksd_rule,
+                fetch_fn=lambda: self.ksd_rule_collector.ingest(max_pages=options.ksd_rule_max_pages),
+            )
+            run_collector(
+                label="FSC",
+                source_key="fsc_scrape",
+                enabled=options.include_fsc,
+                fetch_fn=lambda: self.fsc_collector.ingest(max_pages_each=options.fsc_max_pages),
+            )
+            run_collector(
+                label="FSC Admin",
+                source_key="fsc_admin_scrape",
+                enabled=options.include_fsc_admin,
+                fetch_fn=lambda: self.fsc_admin_collector.ingest(max_pages=options.fsc_admin_max_pages),
+            )
+            run_collector(
+                label="FSC ReplyCase",
+                source_key="fsc_reply_scrape",
+                enabled=options.include_fsc_reply,
+                fetch_fn=lambda: self.fsc_reply_collector.ingest(max_pages=options.fsc_reply_max_pages),
+            )
+            run_collector(
+                label="BOK",
+                source_key="bok_scrape",
+                enabled=options.include_bok,
+                fetch_fn=lambda: self.bok_collector.ingest(max_pages=options.bok_max_pages),
+            )
+            run_collector(
+                label="KFB",
+                source_key="kfb_scrape",
+                enabled=options.include_kfb,
+                fetch_fn=lambda: self.kfb_collector.ingest(max_pages=options.kfb_max_pages),
+            )
+            run_collector(
+                label="FSEC",
+                source_key="fsec_scrape",
+                enabled=options.include_fsec,
+                fetch_fn=lambda: self.fsec_collector.ingest(max_pages=options.fsec_max_pages),
+            )
+            run_collector(
+                label="KRX Recent Rules",
+                source_key="krx_recent_scrape",
+                enabled=options.include_krx_recent,
+                fetch_fn=lambda: self.krx_collector.ingest_recent_rule_changes(max_pages=options.krx_recent_max_pages),
+            )
+            run_collector(
+                label="KRX Rule Notice",
+                source_key="krx_notice_scrape",
+                enabled=options.include_krx_notice,
+                fetch_fn=lambda: self.krx_collector.ingest_rule_change_notices(max_pages=options.krx_notice_max_pages),
+            )
+            run_collector(
+                label="KOFIA Recent Rules",
+                source_key="kofia_recent_scrape",
+                enabled=options.include_kofia_recent,
+                fetch_fn=lambda: self.kofia_collector.ingest_recent_rule_changes(max_pages=options.kofia_recent_max_pages),
+            )
+            run_collector(
+                label="KOFIA Rule Notice",
+                source_key="kofia_notice_scrape",
+                enabled=options.include_kofia_notice,
+                fetch_fn=lambda: self.kofia_collector.ingest_rule_change_notices(max_pages=options.kofia_notice_max_pages),
+            )
 
             if options.precompute_analytics:
                 print("[INFO] Pre-computing analytics (keywords)...")
@@ -3023,6 +3013,8 @@ class UnifiedPressIngestService:
                 "run_at": now_iso(),
                 "inserted_or_updated_this_run": total_articles,
                 "source_counts_this_run": source_counts,
+                "collector_errors": collector_errors,
+                "failed_collectors": sorted(collector_errors.keys()),
                 "table_summary": [
                     {"source_system": source_system, "source_channel": source_channel, "count": count}
                     for (source_system, source_channel, count) in summary
@@ -3096,6 +3088,9 @@ class UnifiedIngestCliApp:
         )
         parser.add_argument("--analytics-only", action="store_true", help="Skip collectors and run analytics pre-computation only")
         parser.add_argument("--skip-analytics", action="store_true", help="Skip analytics pre-computation at end")
+        parser.add_argument("--fail-on-collector-error", action="store_true", help="Exit non-zero when any collector fails")
+        parser.add_argument("--collector-retry-attempts", type=int, default=2, help="Retry attempts per collector on failure")
+        parser.add_argument("--collector-retry-backoff-sec", type=float, default=2.0, help="Base backoff seconds between collector retries")
 
         parser.add_argument("--no-api", action="store_true", help="Disable Data.go.kr API collector")
         parser.add_argument("--no-fss", action="store_true", help="Disable FSS collector")
@@ -3174,6 +3169,8 @@ class UnifiedIngestCliApp:
             kofia_notice_max_pages=args.kofia_notice_max_pages,
             api_orgs=args.api_orgs,
             precompute_analytics=not args.skip_analytics,
+            collector_retry_attempts=args.collector_retry_attempts,
+            collector_retry_backoff_sec=args.collector_retry_backoff_sec,
         )
 
     def _apply_scope_options(self, args: argparse.Namespace) -> None:
@@ -3229,6 +3226,10 @@ class UnifiedIngestCliApp:
 
         print(f"saved preview: {args.preview_json}")
         print(f"db: {args.db_path}")
+        if args.fail_on_collector_error and result.get("collector_errors"):
+            failed = ", ".join(sorted(result["collector_errors"].keys()))
+            print(f"[ERROR] Collector failures detected: {failed}")
+            raise SystemExit(2)
         return result
 
 
