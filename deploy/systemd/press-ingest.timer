@@ -2,6 +2,7 @@
 Description=Run press ingest five times daily
 
 [Timer]
+Timezone=Asia/Seoul
 OnCalendar=*-*-* 09:00:00
 OnCalendar=*-*-* 13:00:00
 OnCalendar=*-*-* 16:00:00

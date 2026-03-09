@@ -5,6 +5,9 @@
 
 set -u
 
+# Keep date window and "today" semantics consistent with Korea operations.
+export TZ="Asia/Seoul"
+
 cd "$(dirname "$0")"
 mkdir -p logs
 
@@ -55,7 +58,7 @@ LOG_FILE="logs/ingest_${TS}.log"
 echo "[INFO] Ingest start: ${START_DATE} ~ ${END_DATE}"
 echo "[INFO] Log file: ${LOG_FILE}"
 
-"$PYTHON_BIN" unified_press_ingest.py \
+PYTHONUNBUFFERED=1 "$PYTHON_BIN" unified_press_ingest.py \
   --service-key "$SERVICE_KEY" \
   --start-date "$START_DATE" \
   --end-date "$END_DATE" \
@@ -74,11 +77,12 @@ if [ "$EXIT_CODE" -eq 0 ]; then
   if [ "$RUN_ATTACHMENT_PIPELINE" = "1" ] && [ -f "attachment_pipeline.py" ]; then
     ATTACH_LOG_FILE="logs/attachment_pipeline_${TS}.log"
     echo "[INFO] Starting attachment pipeline..."
-    "$PYTHON_BIN" attachment_pipeline.py \
+    PYTHONUNBUFFERED=1 "$PYTHON_BIN" attachment_pipeline.py \
       --db-path "$DB_PATH" \
       --download-dir "attachment_store" \
       --batch-size 120 \
       --max-retry 3 \
+      ${ATTACH_CORE_ONLY:+--core-only} \
       > "$ATTACH_LOG_FILE" 2>&1
     ATTACH_EXIT=$?
     cat "$ATTACH_LOG_FILE"

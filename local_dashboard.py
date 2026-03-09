@@ -38,6 +38,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
     _stats_cache = {}    # {(title_q, press_type, org, from, to): (timestamp, data)}
     _keywords_cache = {} # {(top_n): (timestamp, data)}
     CACHE_TTL = 300      # 5 minutes
+    PRESS_TYPE_CHANNELS = {
+        "press_release": [
+            "korea_policy_briefing_press_release",
+            "fss_press_release",
+            "ksd_press_release",
+            "bok_press_release",
+        ],
+        "press_explainer": ["fss_press_explainer", "fsc_press_explainer"],
+        "rule_change_notice": [
+            "fsc_rule_change_notice",
+            "ksd_rule_change_notice",
+            "krx_rule_change_notice",
+            "kofia_rule_change_notice",
+        ],
+        "recent_rule_change_info": [
+            "fsc_regulation_notice",
+            "krx_recent_rule_change",
+            "kofia_recent_rule_change",
+        ],
+        "admin_guidance_notice": ["fsc_admin_guidance_notice", "fss_admin_guidance_notice"],
+        "admin_guidance_enforcement": ["fsc_admin_guidance_enforcement", "fss_admin_guidance_enforcement"],
+        "law_interpretation": ["fsc_law_interpretation"],
+        "no_action_opinion": ["fsc_no_action_opinion"],
+        "other_data": ["kfb_publicdata_other", "fsec_bbs_222"],
+    }
 
     def _json_response(self, payload, status=200):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -161,6 +186,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.handle_article(qs)
             return
+        if path == "/api/article-report":
+            if not self._require_auth_api():
+                return
+            self.handle_article_report(qs)
+            return
 
         if path == "/api/similar":
             if not self._require_auth_api():
@@ -177,6 +207,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not self._require_auth_api():
                 return
             self.handle_stats(qs)
+            return
+        if path == "/api/type-report":
+            if not self._require_auth_api():
+                return
+            self.handle_type_report(qs)
             return
 
         if path == "/api/notifications":
@@ -332,46 +367,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 where.append("(a.id IN (SELECT rowid FROM articles_fts WHERE articles_fts MATCH ?) OR replace(a.title, ' ', '') LIKE ?)")
                 params.extend([match_query, f"%{joined_word}%"])
                 
-        if press_type == "press_release":
-            where.append("a.source_channel IN (?, ?, ?, ?)")
-            params.extend(["korea_policy_briefing_press_release", "fss_press_release", "ksd_press_release", "bok_press_release"])
-        elif press_type == "press_explainer":
-            where.append("a.source_channel IN (?, ?)")
-            params.extend(["fss_press_explainer", "fsc_press_explainer"])
-        elif press_type == "rule_change_notice":
-            where.append("a.source_channel IN (?, ?, ?, ?)")
-            params.extend(
-                [
-                    "fsc_rule_change_notice",
-                    "ksd_rule_change_notice",
-                    "krx_rule_change_notice",
-                    "kofia_rule_change_notice",
-                ]
-            )
-        elif press_type == "recent_rule_change_info":
-            where.append("a.source_channel IN (?, ?, ?)")
-            params.extend(
-                [
-                    "fsc_regulation_notice",
-                    "krx_recent_rule_change",
-                    "kofia_recent_rule_change",
-                ]
-            )
-        elif press_type == "admin_guidance_notice":
-            where.append("a.source_channel IN (?, ?)")
-            params.extend(["fsc_admin_guidance_notice", "fss_admin_guidance_notice"])
-        elif press_type == "admin_guidance_enforcement":
-            where.append("a.source_channel IN (?, ?)")
-            params.extend(["fsc_admin_guidance_enforcement", "fss_admin_guidance_enforcement"])
-        elif press_type == "law_interpretation":
-            where.append("a.source_channel = ?")
-            params.append("fsc_law_interpretation")
-        elif press_type == "no_action_opinion":
-            where.append("a.source_channel = ?")
-            params.append("fsc_no_action_opinion")
-        elif press_type == "other_data":
-            where.append("a.source_channel IN (?, ?)")
-            params.extend(["kfb_publicdata_other", "fsec_bbs_222"])
+        channels = self.PRESS_TYPE_CHANNELS.get(press_type, [])
+        if channels:
+            placeholders = ", ".join(["?"] * len(channels))
+            where.append(f"a.source_channel IN ({placeholders})")
+            params.extend(channels)
         if organization:
             where.append("a.organization = ?")
             params.append(organization)
@@ -389,6 +389,63 @@ class DashboardHandler(BaseHTTPRequestHandler):
         from_expr = "FROM articles a " + join_sql
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         return from_expr, where_sql, params
+
+    def handle_type_report(self, qs):
+        press_type = (qs.get("press_type", [""])[0] or "").strip()
+        from_date = (qs.get("from_date", [""])[0] or "").strip()
+        to_date = (qs.get("to_date", [""])[0] or "").strip()
+
+        if not press_type:
+            self._json_response({"item": None})
+            return
+
+        channels = self.PRESS_TYPE_CHANNELS.get(press_type, [])
+        if not channels:
+            self._json_response({"item": None})
+            return
+
+        conn = self._db()
+        try:
+            channel_placeholders = ", ".join(["?"] * len(channels))
+            date_sql = ""
+            params = list(channels)
+            if from_date:
+                date_sql += " AND date(substr(a.published_at, 1, 10)) >= date(?)"
+                params.append(from_date)
+            if to_date:
+                date_sql += " AND date(substr(a.published_at, 1, 10)) <= date(?)"
+                params.append(to_date)
+
+            row = conn.execute(
+                f"""
+                SELECT
+                    ro.id,
+                    ro.title,
+                    ro.summary_text,
+                    ro.report_markdown,
+                    ro.llm_status,
+                    ro.llm_completed_at,
+                    ro.created_at
+                FROM report_outputs ro
+                WHERE COALESCE(ro.llm_status, 'pending') = 'completed'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM report_output_sources rs
+                    JOIN articles a ON a.id = rs.article_id
+                    WHERE rs.report_output_id = ro.id
+                      AND a.source_channel IN ({channel_placeholders})
+                      {date_sql}
+                  )
+                ORDER BY COALESCE(ro.llm_completed_at, ro.created_at) DESC, ro.id DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+            self._json_response({"item": dict(row) if row else None})
+        except sqlite3.OperationalError:
+            self._json_response({"item": None})
+        finally:
+            conn.close()
 
     def handle_stats(self, qs):
         now = time.time()
@@ -565,6 +622,53 @@ class DashboardHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
 
+    def handle_article_report(self, qs):
+        article_id = to_int(qs.get("id", ["0"])[0], 0)
+        if article_id <= 0:
+            self._json_response({"error": "id is required"}, status=400)
+            return
+
+        conn = self._db()
+        try:
+            row = conn.execute(
+                """
+                SELECT
+                    ro.id,
+                    ro.title,
+                    ro.summary_text,
+                    ro.report_markdown,
+                    ro.llm_status,
+                    ro.llm_provider,
+                    ro.llm_model,
+                    ro.llm_completed_at,
+                    ro.created_at
+                FROM report_outputs ro
+                JOIN report_output_sources rs ON rs.report_output_id = ro.id
+                WHERE rs.article_id = ?
+                  AND COALESCE(ro.llm_status, 'pending') = 'completed'
+                ORDER BY COALESCE(ro.llm_completed_at, ro.created_at) DESC, ro.id DESC
+                LIMIT 1
+                """,
+                (article_id,),
+            ).fetchone()
+
+            if not row:
+                self._json_response({"item": None})
+                return
+
+            source_count = conn.execute(
+                "SELECT COUNT(*) FROM report_output_sources WHERE report_output_id = ?",
+                (row["id"],),
+            ).fetchone()[0]
+
+            payload = dict(row)
+            payload["source_count"] = int(source_count or 0)
+            self._json_response({"item": payload})
+        except sqlite3.OperationalError:
+            self._json_response({"item": None})
+        finally:
+            conn.close()
+
     def handle_similar(self, qs):
         article_id = to_int(qs.get("id", ["0"])[0], 0)
         limit = max(3, min(20, to_int((qs.get("limit", ["8"])[0] or "8"), 8)))
@@ -705,7 +809,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 where = f"{date_expr} > date(?)"
                 params = [since_date]
             else:
-                where = f"{date_expr} = date('now', 'localtime')"
+                # Use fixed KST date baseline to avoid server timezone drift.
+                where = f"{date_expr} = date('now', '+9 hours')"
                 params = []
 
             type_case = """

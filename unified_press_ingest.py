@@ -225,6 +225,33 @@ def infer_file_name_from_url(file_url: Optional[str]) -> str:
     return name if name else "unknown_file"
 
 
+def normalize_attachment_title(file_name: Optional[str], file_url: Optional[str]) -> str:
+    raw = (file_name or "").strip()
+    if not raw and file_url:
+        raw = infer_file_name_from_url(file_url)
+    raw = re.sub(r"\s+", " ", raw).strip().lower()
+    raw = re.sub(r"\.(pdf|hwpx|hwp|docx|doc|xlsx|xls|pptx|ppt|zip|txt)$", "", raw)
+    return raw
+
+
+def attachment_ext_priority(ext: Optional[str]) -> int:
+    e = (ext or "").strip().lower().lstrip(".")
+    ranking = {
+        "pdf": 1,
+        "hwpx": 2,
+        "hwp": 3,
+        "docx": 4,
+        "doc": 5,
+        "xlsx": 6,
+        "xls": 7,
+        "pptx": 8,
+        "ppt": 9,
+        "txt": 10,
+        "zip": 11,
+    }
+    return ranking.get(e, 99)
+
+
 def hash_text_sha256(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
@@ -473,6 +500,12 @@ class ArticleRepository:
               summary_text TEXT,
               report_markdown TEXT,
               report_json TEXT,
+              llm_status TEXT DEFAULT 'pending',
+              llm_provider TEXT,
+              llm_model TEXT,
+              llm_prompt TEXT,
+              llm_response_raw TEXT,
+              llm_completed_at TEXT,
               created_at TEXT NOT NULL,
               FOREIGN KEY(job_id) REFERENCES report_jobs(id)
             )
@@ -495,21 +528,6 @@ class ArticleRepository:
             )
             """
         )
-        # Performance Indexes
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published_at)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_org ON articles(organization)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_channel ON articles(source_channel)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_article ON attachments(article_id)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_url_hash ON attachments(url_hash)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_document ON attachments(document_id)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_status ON attachments(processing_status)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment_docs_status ON attachment_documents(download_status)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment_docs_hash ON attachment_documents(url_hash)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment_extract_doc ON attachment_extractions(document_id)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_jobs_status ON report_jobs(status)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_outputs_job ON report_outputs(job_id)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_sources_output ON report_output_sources(report_output_id)")
-
         # FTS5 for Search Optimization
         self.conn.execute(
             """
@@ -552,6 +570,42 @@ class ArticleRepository:
             self.conn.execute("ALTER TABLE attachments ADD COLUMN last_error TEXT")
         if "last_processed_at" not in attachment_cols:
             self.conn.execute("ALTER TABLE attachments ADD COLUMN last_processed_at TEXT")
+        attachment_doc_cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(attachment_documents)").fetchall()
+        }
+        if "download_status" not in attachment_doc_cols:
+            self.conn.execute("ALTER TABLE attachment_documents ADD COLUMN download_status TEXT DEFAULT 'pending'")
+        if "url_hash" not in attachment_doc_cols:
+            self.conn.execute("ALTER TABLE attachment_documents ADD COLUMN url_hash TEXT")
+        report_output_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(report_outputs)").fetchall()}
+        if "llm_status" not in report_output_cols:
+            self.conn.execute("ALTER TABLE report_outputs ADD COLUMN llm_status TEXT DEFAULT 'pending'")
+        if "llm_provider" not in report_output_cols:
+            self.conn.execute("ALTER TABLE report_outputs ADD COLUMN llm_provider TEXT")
+        if "llm_model" not in report_output_cols:
+            self.conn.execute("ALTER TABLE report_outputs ADD COLUMN llm_model TEXT")
+        if "llm_prompt" not in report_output_cols:
+            self.conn.execute("ALTER TABLE report_outputs ADD COLUMN llm_prompt TEXT")
+        if "llm_response_raw" not in report_output_cols:
+            self.conn.execute("ALTER TABLE report_outputs ADD COLUMN llm_response_raw TEXT")
+        if "llm_completed_at" not in report_output_cols:
+            self.conn.execute("ALTER TABLE report_outputs ADD COLUMN llm_completed_at TEXT")
+
+        # Performance indexes must be created after compatibility ALTERs above.
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published_at)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_org ON articles(organization)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_channel ON articles(source_channel)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_article ON attachments(article_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_url_hash ON attachments(url_hash)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_document ON attachments(document_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_status ON attachments(processing_status)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment_docs_status ON attachment_documents(download_status)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment_docs_hash ON attachment_documents(url_hash)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment_extract_doc ON attachment_extractions(document_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_jobs_status ON report_jobs(status)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_outputs_job ON report_outputs(job_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_outputs_llm_status ON report_outputs(llm_status)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_report_sources_output ON report_output_sources(report_output_id)")
         self.conn.commit()
 
     def upsert_article(self, article: Dict[str, Any]) -> int:
@@ -606,7 +660,26 @@ class ArticleRepository:
         return int(row[0])
 
     def upsert_attachments(self, article_id: int, attachments: Sequence[Dict[str, Any]]) -> None:
+        # Deduplicate by logical title within an article.
+        # If duplicate titles exist, prefer richer/standard formats:
+        # pdf > hwpx > hwp > others.
+        best_by_title: Dict[str, Dict[str, Any]] = {}
         for att in attachments:
+            file_url = att.get("file_url")
+            title_key = normalize_attachment_title(att.get("file_name"), file_url)
+            if not title_key:
+                title_key = file_url or f"unknown_{len(best_by_title)}"
+            current = best_by_title.get(title_key)
+            if current is None:
+                best_by_title[title_key] = att
+                continue
+
+            cur_pri = attachment_ext_priority(current.get("file_ext") or file_ext_from_name(current.get("file_name")))
+            new_pri = attachment_ext_priority(att.get("file_ext") or file_ext_from_name(att.get("file_name")))
+            if new_pri < cur_pri:
+                best_by_title[title_key] = att
+
+        for att in best_by_title.values():
             file_url = att.get("file_url")
             url_hash = hash_text_sha256(file_url)
             self.conn.execute(
