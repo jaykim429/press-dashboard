@@ -2784,6 +2784,7 @@ class IngestRunOptions:
     kofia_notice_max_pages: int = 1
     fss_admin_max_pages: int = 1
     api_orgs: Optional[Sequence[str]] = None
+    precompute_analytics: bool = True
 
 
 class UnifiedPressIngestService:
@@ -2990,25 +2991,31 @@ class UnifiedPressIngestService:
                 except Exception as e:
                     print(f"[Error in KOFIA Rule Notice] {e}")
 
-            print("[INFO] Pre-computing analytics (keywords)...")
-            try:
-                from local_dashboard import DashboardHandler
-                # Limit to 300 recent articles for realistic extraction speed while maintaining quality
-                rows = conn.execute("SELECT title, content_text FROM articles ORDER BY id DESC LIMIT 300").fetchall()
-                docs = [{"title": r[0], "content_text": r[1]} for r in rows]
-                keywords = DashboardHandler._extract_keywords(docs, top_n=12)
-                
-                conn.execute("CREATE TABLE IF NOT EXISTS precomputed_keywords (keyword TEXT, score REAL, computed_at TEXT)")
-                conn.execute("DELETE FROM precomputed_keywords")
-                ts = now_iso()
-                for kw in keywords:
-                    conn.execute("INSERT INTO precomputed_keywords (keyword, score, computed_at) VALUES (?, ?, ?)", (kw["keyword"], kw["score"], ts))
-                conn.commit()
-                print("[INFO] Pre-computation complete.")
-            except ImportError as e:
-                print(f"[Warning] Failed to import local_dashboard to precompute keywords: {e}")
-            except Exception as e:
-                print(f"[Error in Analytics Pre-computation] {e}")
+            if options.precompute_analytics:
+                print("[INFO] Pre-computing analytics (keywords)...")
+                try:
+                    from local_dashboard import DashboardHandler
+                    # Limit to 300 recent articles for realistic extraction speed while maintaining quality
+                    rows = conn.execute("SELECT title, content_text FROM articles ORDER BY id DESC LIMIT 300").fetchall()
+                    docs = [{"title": r[0], "content_text": r[1]} for r in rows]
+                    keywords = DashboardHandler._extract_keywords(docs, top_n=12)
+
+                    conn.execute("CREATE TABLE IF NOT EXISTS precomputed_keywords (keyword TEXT, score REAL, computed_at TEXT)")
+                    conn.execute("DELETE FROM precomputed_keywords")
+                    ts = now_iso()
+                    for kw in keywords:
+                        conn.execute(
+                            "INSERT INTO precomputed_keywords (keyword, score, computed_at) VALUES (?, ?, ?)",
+                            (kw["keyword"], kw["score"], ts),
+                        )
+                    conn.commit()
+                    print("[INFO] Pre-computation complete.")
+                except ImportError as e:
+                    print(f"[Warning] Failed to import local_dashboard to precompute keywords: {e}")
+                except Exception as e:
+                    print(f"[Error in Analytics Pre-computation] {e}")
+            else:
+                print("[INFO] Skipping analytics pre-computation (--skip-analytics)")
 
             summary = repo.fetch_summary()
             latest = repo.fetch_latest(limit=20)
@@ -3036,6 +3043,41 @@ class UnifiedPressIngestService:
             conn.close()
 
 class UnifiedIngestCliApp:
+    COLLECTOR_KEYS = [
+        "api",
+        "fss",
+        "fss-admin",
+        "ksd",
+        "fsc",
+        "fsc-admin",
+        "fsc-reply",
+        "bok",
+        "kfb",
+        "fsec",
+        "ksd-rule",
+        "krx-recent",
+        "krx-notice",
+        "kofia-recent",
+        "kofia-notice",
+    ]
+    COLLECTOR_NO_FLAG = {
+        "api": "no_api",
+        "fss": "no_fss",
+        "fss-admin": "no_fss_admin",
+        "ksd": "no_ksd",
+        "fsc": "no_fsc",
+        "fsc-admin": "no_fsc_admin",
+        "fsc-reply": "no_fsc_reply",
+        "bok": "no_bok",
+        "kfb": "no_kfb",
+        "fsec": "no_fsec",
+        "ksd-rule": "no_ksd_rule",
+        "krx-recent": "no_krx_recent",
+        "krx-notice": "no_krx_notice",
+        "kofia-recent": "no_kofia_recent",
+        "kofia-notice": "no_kofia_notice",
+    }
+
     def __init__(self, http: Optional[HttpClient] = None):
         self.http = http or HttpClient()
 
@@ -3046,6 +3088,14 @@ class UnifiedIngestCliApp:
         parser.add_argument("--start-date", required=True, help="YYYYMMDD")
         parser.add_argument("--end-date", required=True, help="YYYYMMDD")
         parser.add_argument("--db-path", default="press_unified.db", help="SQLite DB path")
+        parser.add_argument(
+            "--only-collector",
+            choices=self.COLLECTOR_KEYS,
+            default=None,
+            help="Run only one collector key (e.g. fss, fsc, bok)",
+        )
+        parser.add_argument("--analytics-only", action="store_true", help="Skip collectors and run analytics pre-computation only")
+        parser.add_argument("--skip-analytics", action="store_true", help="Skip analytics pre-computation at end")
 
         parser.add_argument("--no-api", action="store_true", help="Disable Data.go.kr API collector")
         parser.add_argument("--no-fss", action="store_true", help="Disable FSS collector")
@@ -3123,7 +3173,19 @@ class UnifiedIngestCliApp:
             kofia_recent_max_pages=args.kofia_recent_max_pages,
             kofia_notice_max_pages=args.kofia_notice_max_pages,
             api_orgs=args.api_orgs,
+            precompute_analytics=not args.skip_analytics,
         )
+
+    def _apply_scope_options(self, args: argparse.Namespace) -> None:
+        if args.analytics_only:
+            for no_attr in self.COLLECTOR_NO_FLAG.values():
+                setattr(args, no_attr, True)
+            args.skip_analytics = False
+            return
+
+        if args.only_collector:
+            for key, no_attr in self.COLLECTOR_NO_FLAG.items():
+                setattr(args, no_attr, key != args.only_collector)
 
     def run(self, args: argparse.Namespace) -> Dict[str, Any]:
         # Load YAML config and merge into args (args CLI values take precedence)
@@ -3148,6 +3210,7 @@ class UnifiedIngestCliApp:
 
         if not getattr(args, "api_orgs", None):
             args.api_orgs = ["금융위원회", "금융감독원", "한국은행", "기획재정부", "재정경제부"]
+        self._apply_scope_options(args)
         validate_dates(args.start_date, args.end_date)
         service = UnifiedPressIngestService(http=self.http)
         options = self.build_options(args)
