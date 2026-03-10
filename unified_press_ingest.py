@@ -8,7 +8,7 @@ import sqlite3
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, quote, urlencode, unquote, urljoin, urlparse
 import xml.etree.ElementTree as ET
 import abc
@@ -83,6 +83,16 @@ FSS_BOARDS = {
     "fss_press_release": {"bbs_id": "B0000188", "menu_no": "200218", "name": "보도자료"},
     "fss_press_explainer": {"bbs_id": "B0000189", "menu_no": "200219", "name": "보도설명자료"},
 }
+
+
+DEFAULT_API_ORGS: List[str] = [
+    "\uae08\uc735\uc704\uc6d0\ud68c",
+    "\uae08\uc735\uac10\ub3c5\uc6d0",
+    "\ud55c\uad6d\uc740\ud589",
+    "\uac1c\uc778\uc815\ubcf4\ubcf4\ud638\uc704\uc6d0\ud68c",
+    "\uae30\ud68d\uc7ac\uc815\ubd80",
+    "\uc7ac\uc815\uacbd\uc81c\ubd80",
+]
 
 
 def now_iso() -> str:
@@ -2557,7 +2567,27 @@ class KofiaCollector:
             if file_url in seen:
                 continue
             seen.add(file_url)
-            file_name = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip() or "attached_file"
+            # KOFIA download anchors are often icon-only (<a><img .../></a>), so text() can be empty.
+            # Fall back to title/alt attributes, then URL query tokens to preserve logical attachment identity.
+            file_name = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()
+            if not file_name:
+                file_name = (a.get("title") or "").strip()
+            if not file_name:
+                img = a.find("img")
+                if img:
+                    file_name = ((img.get("title") or "") or (img.get("alt") or "")).strip()
+            file_name = re.sub(r"\(.*?\)", "", file_name).strip()
+            if not file_name:
+                q = parse_qs(urlparse(file_url).query)
+                gubun = (q.get("gubun", [None])[0] or "").strip()
+                seq = (q.get("seq", [None])[0] or "").strip()
+                kind_map = {
+                    "101": "full_text",
+                    "104": "amendment_text",
+                    "105": "comparison_table",
+                }
+                kind = kind_map.get(gubun, f"gubun_{gubun}" if gubun else "attachment")
+                file_name = f"kofia_{kind}_{seq}" if seq else f"kofia_{kind}"
             out.append(
                 {
                     "file_name": file_name,
@@ -2789,6 +2819,17 @@ class IngestRunOptions:
     collector_retry_backoff_sec: float = 2.0
 
 
+CollectorFetchFn = Callable[[], List[Dict[str, Any]]]
+
+
+@dataclass
+class CollectorRunSpec:
+    label: str
+    source_key: str
+    enabled: bool
+    fetch_fn: CollectorFetchFn
+
+
 class UnifiedPressIngestService:
     def __init__(
         self,
@@ -2835,6 +2876,105 @@ class UnifiedPressIngestService:
             count += 1
         return count
 
+    def _build_collector_specs(self, options: IngestRunOptions) -> List[CollectorRunSpec]:
+        return [
+            CollectorRunSpec(
+                label="DataGoAPI",
+                source_key="data_go_api",
+                enabled=options.include_api,
+                fetch_fn=lambda: self.api_collector.ingest(
+                    service_key=options.service_key,
+                    start_date=options.start_date,
+                    end_date=options.end_date,
+                    allowed_orgs=options.api_orgs,
+                ),
+            ),
+            CollectorRunSpec(
+                label="FSS",
+                source_key="fss_scrape",
+                enabled=options.include_fss,
+                fetch_fn=lambda: self.fss_collector.ingest(max_pages_each=options.fss_max_pages),
+            ),
+            CollectorRunSpec(
+                label="FSS Admin",
+                source_key="fss_admin_scrape",
+                enabled=options.include_fss_admin,
+                fetch_fn=lambda: self.fss_admin_collector.ingest(max_pages=options.fss_admin_max_pages),
+            ),
+            CollectorRunSpec(
+                label="KSD",
+                source_key="ksd_scrape",
+                enabled=options.include_ksd,
+                fetch_fn=lambda: self.ksd_collector.ingest(max_pages=options.ksd_max_pages),
+            ),
+            CollectorRunSpec(
+                label="KSD Rule",
+                source_key="ksd_rule_scrape",
+                enabled=options.include_ksd_rule,
+                fetch_fn=lambda: self.ksd_rule_collector.ingest(max_pages=options.ksd_rule_max_pages),
+            ),
+            CollectorRunSpec(
+                label="FSC",
+                source_key="fsc_scrape",
+                enabled=options.include_fsc,
+                fetch_fn=lambda: self.fsc_collector.ingest(max_pages_each=options.fsc_max_pages),
+            ),
+            CollectorRunSpec(
+                label="FSC Admin",
+                source_key="fsc_admin_scrape",
+                enabled=options.include_fsc_admin,
+                fetch_fn=lambda: self.fsc_admin_collector.ingest(max_pages=options.fsc_admin_max_pages),
+            ),
+            CollectorRunSpec(
+                label="FSC ReplyCase",
+                source_key="fsc_reply_scrape",
+                enabled=options.include_fsc_reply,
+                fetch_fn=lambda: self.fsc_reply_collector.ingest(max_pages=options.fsc_reply_max_pages),
+            ),
+            CollectorRunSpec(
+                label="BOK",
+                source_key="bok_scrape",
+                enabled=options.include_bok,
+                fetch_fn=lambda: self.bok_collector.ingest(max_pages=options.bok_max_pages),
+            ),
+            CollectorRunSpec(
+                label="KFB",
+                source_key="kfb_scrape",
+                enabled=options.include_kfb,
+                fetch_fn=lambda: self.kfb_collector.ingest(max_pages=options.kfb_max_pages),
+            ),
+            CollectorRunSpec(
+                label="FSEC",
+                source_key="fsec_scrape",
+                enabled=options.include_fsec,
+                fetch_fn=lambda: self.fsec_collector.ingest(max_pages=options.fsec_max_pages),
+            ),
+            CollectorRunSpec(
+                label="KRX Recent Rules",
+                source_key="krx_recent_scrape",
+                enabled=options.include_krx_recent,
+                fetch_fn=lambda: self.krx_collector.ingest_recent_rule_changes(max_pages=options.krx_recent_max_pages),
+            ),
+            CollectorRunSpec(
+                label="KRX Rule Notice",
+                source_key="krx_notice_scrape",
+                enabled=options.include_krx_notice,
+                fetch_fn=lambda: self.krx_collector.ingest_rule_change_notices(max_pages=options.krx_notice_max_pages),
+            ),
+            CollectorRunSpec(
+                label="KOFIA Recent Rules",
+                source_key="kofia_recent_scrape",
+                enabled=options.include_kofia_recent,
+                fetch_fn=lambda: self.kofia_collector.ingest_recent_rule_changes(max_pages=options.kofia_recent_max_pages),
+            ),
+            CollectorRunSpec(
+                label="KOFIA Rule Notice",
+                source_key="kofia_notice_scrape",
+                enabled=options.include_kofia_notice,
+                fetch_fn=lambda: self.kofia_collector.ingest_rule_change_notices(max_pages=options.kofia_notice_max_pages),
+            ),
+        ]
+
     def run(self, options: IngestRunOptions) -> Dict[str, Any]:
         conn = sqlite3.connect(options.db_path)
         try:
@@ -2847,14 +2987,9 @@ class UnifiedPressIngestService:
 
             collector_errors: Dict[str, str] = {}
 
-            def run_collector(
-                label: str,
-                source_key: str,
-                enabled: bool,
-                fetch_fn: Any,
-            ) -> None:
+            def run_collector(spec: CollectorRunSpec) -> None:
                 nonlocal total_articles
-                if not enabled:
+                if not spec.enabled:
                     return
 
                 attempts = max(1, int(options.collector_retry_attempts))
@@ -2863,123 +2998,30 @@ class UnifiedPressIngestService:
 
                 for attempt in range(1, attempts + 1):
                     try:
-                        items = fetch_fn()
-                        source_counts[source_key] = len(items)
+                        items = spec.fetch_fn()
+                        source_counts[spec.source_key] = len(items)
                         total_articles += self._persist(repo, items)
                         conn.commit()
                         if attempt > 1:
-                            print(f"[INFO] {label} recovered on retry attempt {attempt}/{attempts}")
+                            print(f"[INFO] {spec.label} recovered on retry attempt {attempt}/{attempts}")
                         return
                     except Exception as exc:
                         last_exc = exc
                         if attempt < attempts:
                             wait_sec = base_wait * attempt
                             print(
-                                f"[WARN] {label} attempt {attempt}/{attempts} failed: {exc}. "
+                                f"[WARN] {spec.label} attempt {attempt}/{attempts} failed: {exc}. "
                                 f"Retrying in {wait_sec:.1f}s"
                             )
                             if wait_sec > 0:
                                 time.sleep(wait_sec)
                             continue
 
-                collector_errors[label] = str(last_exc) if last_exc is not None else "unknown error"
-                print(f"[Error in {label}] {last_exc}")
+                collector_errors[spec.label] = str(last_exc) if last_exc is not None else "unknown error"
+                print(f"[Error in {spec.label}] {last_exc}")
 
-            run_collector(
-                label="DataGoAPI",
-                source_key="data_go_api",
-                enabled=options.include_api,
-                fetch_fn=lambda: self.api_collector.ingest(
-                    service_key=options.service_key,
-                    start_date=options.start_date,
-                    end_date=options.end_date,
-                    allowed_orgs=options.api_orgs,
-                ),
-            )
-            run_collector(
-                label="FSS",
-                source_key="fss_scrape",
-                enabled=options.include_fss,
-                fetch_fn=lambda: self.fss_collector.ingest(max_pages_each=options.fss_max_pages),
-            )
-            run_collector(
-                label="FSS Admin",
-                source_key="fss_admin_scrape",
-                enabled=options.include_fss_admin,
-                fetch_fn=lambda: self.fss_admin_collector.ingest(max_pages=options.fss_admin_max_pages),
-            )
-            run_collector(
-                label="KSD",
-                source_key="ksd_scrape",
-                enabled=options.include_ksd,
-                fetch_fn=lambda: self.ksd_collector.ingest(max_pages=options.ksd_max_pages),
-            )
-            run_collector(
-                label="KSD Rule",
-                source_key="ksd_rule_scrape",
-                enabled=options.include_ksd_rule,
-                fetch_fn=lambda: self.ksd_rule_collector.ingest(max_pages=options.ksd_rule_max_pages),
-            )
-            run_collector(
-                label="FSC",
-                source_key="fsc_scrape",
-                enabled=options.include_fsc,
-                fetch_fn=lambda: self.fsc_collector.ingest(max_pages_each=options.fsc_max_pages),
-            )
-            run_collector(
-                label="FSC Admin",
-                source_key="fsc_admin_scrape",
-                enabled=options.include_fsc_admin,
-                fetch_fn=lambda: self.fsc_admin_collector.ingest(max_pages=options.fsc_admin_max_pages),
-            )
-            run_collector(
-                label="FSC ReplyCase",
-                source_key="fsc_reply_scrape",
-                enabled=options.include_fsc_reply,
-                fetch_fn=lambda: self.fsc_reply_collector.ingest(max_pages=options.fsc_reply_max_pages),
-            )
-            run_collector(
-                label="BOK",
-                source_key="bok_scrape",
-                enabled=options.include_bok,
-                fetch_fn=lambda: self.bok_collector.ingest(max_pages=options.bok_max_pages),
-            )
-            run_collector(
-                label="KFB",
-                source_key="kfb_scrape",
-                enabled=options.include_kfb,
-                fetch_fn=lambda: self.kfb_collector.ingest(max_pages=options.kfb_max_pages),
-            )
-            run_collector(
-                label="FSEC",
-                source_key="fsec_scrape",
-                enabled=options.include_fsec,
-                fetch_fn=lambda: self.fsec_collector.ingest(max_pages=options.fsec_max_pages),
-            )
-            run_collector(
-                label="KRX Recent Rules",
-                source_key="krx_recent_scrape",
-                enabled=options.include_krx_recent,
-                fetch_fn=lambda: self.krx_collector.ingest_recent_rule_changes(max_pages=options.krx_recent_max_pages),
-            )
-            run_collector(
-                label="KRX Rule Notice",
-                source_key="krx_notice_scrape",
-                enabled=options.include_krx_notice,
-                fetch_fn=lambda: self.krx_collector.ingest_rule_change_notices(max_pages=options.krx_notice_max_pages),
-            )
-            run_collector(
-                label="KOFIA Recent Rules",
-                source_key="kofia_recent_scrape",
-                enabled=options.include_kofia_recent,
-                fetch_fn=lambda: self.kofia_collector.ingest_recent_rule_changes(max_pages=options.kofia_recent_max_pages),
-            )
-            run_collector(
-                label="KOFIA Rule Notice",
-                source_key="kofia_notice_scrape",
-                enabled=options.include_kofia_notice,
-                fetch_fn=lambda: self.kofia_collector.ingest_rule_change_notices(max_pages=options.kofia_notice_max_pages),
-            )
+            for spec in self._build_collector_specs(options):
+                run_collector(spec)
 
             if options.precompute_analytics:
                 print("[INFO] Pre-computing analytics (keywords)...")
@@ -3184,29 +3226,44 @@ class UnifiedIngestCliApp:
             for key, no_attr in self.COLLECTOR_NO_FLAG.items():
                 setattr(args, no_attr, key != args.only_collector)
 
-    def run(self, args: argparse.Namespace) -> Dict[str, Any]:
-        # Load YAML config and merge into args (args CLI values take precedence)
-        yaml_cfg = load_ingest_config(getattr(args, "config", "ingest_config.yaml"))
-        collectors_cfg = yaml_cfg.get("collectors", {})
+    def _merge_yaml_collector_config(self, args: argparse.Namespace, collectors_cfg: Dict[str, Any]) -> None:
+        if not isinstance(collectors_cfg, dict):
+            print("[WARN] Invalid config: collectors must be an object. Ignoring collectors section.")
+            return
+
         for key, col_cfg in collectors_cfg.items():
+            if not isinstance(col_cfg, dict):
+                print(f"[WARN] Invalid collector config for '{key}': expected object, got {type(col_cfg).__name__}")
+                continue
+
             # Map yaml max_pages -> args.xxx_max_pages if CLI left it at default (1)
             max_pages = col_cfg.get("max_pages")
             arg_attr = f"{key}_max_pages"
             if max_pages is not None and hasattr(args, arg_attr):
                 if getattr(args, arg_attr) == 1:
                     setattr(args, arg_attr, max_pages)
+
             # Honour enabled: false in yaml (only if CLI didn't explicitly include/exclude)
             if not col_cfg.get("enabled", True):
                 no_attr = f"no_{key}"
                 if hasattr(args, no_attr):
                     setattr(args, no_attr, True)
-            
+
             if key == "data_go_api" and "api_orgs" in col_cfg:
                 if not getattr(args, "api_orgs", None):
                     args.api_orgs = col_cfg["api_orgs"]
 
+    @staticmethod
+    def _ensure_default_api_orgs(args: argparse.Namespace) -> None:
         if not getattr(args, "api_orgs", None):
-            args.api_orgs = ["금융위원회", "금융감독원", "한국은행", "개인정보보호위원회", "기획재정부", "재정경제부"]
+            args.api_orgs = list(DEFAULT_API_ORGS)
+
+    def run(self, args: argparse.Namespace) -> Dict[str, Any]:
+        # Load YAML config and merge into args (args CLI values take precedence)
+        yaml_cfg = load_ingest_config(getattr(args, "config", "ingest_config.yaml"))
+        collectors_cfg = yaml_cfg.get("collectors", {})
+        self._merge_yaml_collector_config(args, collectors_cfg)
+        self._ensure_default_api_orgs(args)
         self._apply_scope_options(args)
         validate_dates(args.start_date, args.end_date)
         service = UnifiedPressIngestService(http=self.http)
