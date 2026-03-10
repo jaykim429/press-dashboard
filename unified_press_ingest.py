@@ -3206,7 +3206,7 @@ class UnifiedIngestCliApp:
                     args.api_orgs = col_cfg["api_orgs"]
 
         if not getattr(args, "api_orgs", None):
-            args.api_orgs = ["금융위원회", "금융감독원", "한국은행", "기획재정부", "재정경제부"]
+            args.api_orgs = ["금융위원회", "금융감독원", "한국은행", "개인정보보호위원회", "기획재정부", "재정경제부"]
         self._apply_scope_options(args)
         validate_dates(args.start_date, args.end_date)
         service = UnifiedPressIngestService(http=self.http)

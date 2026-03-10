@@ -17,6 +17,7 @@ collectors:
       - "금융위원회"
       - "금융감독원"
       - "한국은행"
+      - "개인정보보호위원회"
       - "기획재정부"
       - "재정경제부"
 
@@ -63,7 +64,7 @@ collectors:
   ksd:
     enabled: true
     description: "한국예탁결제원 보도자료 (스크래핑)"
-    max_pages: 30
+    max_pages: 2
 
   ksd_rule:
     enabled: true
