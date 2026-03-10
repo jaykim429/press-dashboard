@@ -206,13 +206,14 @@
     .noti-modal-body { overflow-y:auto; flex:1; padding:8px 0; }
     .noti-empty { text-align:center; padding:32px 20px; color:var(--gray-060); font-size:14px; }
     .noti-list { list-style: none; margin: 0; padding: 0; }
-    .noti-list-item { display:flex; justify-content:space-between; align-items:center; padding:10px 20px; border-bottom:1px solid var(--border); }
+    .noti-list-item { padding:12px 20px; border-bottom:1px solid var(--border); }
     .noti-list-item:last-child { border-bottom:none; }
     .noti-list-item:hover { background: var(--surface); }
-    .noti-item-left { display:flex; align-items:center; gap:8px; }
-    .noti-org { font-size:14px; font-weight:700; color:var(--black-010); }
-    .noti-type { font-size:13px; color:var(--gray-060); }
-    .noti-badge { background:var(--primary-bg); color:var(--primary); font-size:12px; font-weight:700; border-radius:10px; padding:1px 9px; }
+    .noti-item-meta { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+    .noti-org { font-size:13px; font-weight:700; color:var(--black-010); }
+    .noti-type { font-size:12px; color:var(--gray-060); }
+    .noti-title-link { font-size:14px; font-weight:600; color:var(--black-010); text-decoration:none; line-height:1.4; display:block; }
+    .noti-title-link:hover { text-decoration:underline; text-underline-offset:2px; }
     .noti-modal-footer { padding:12px 20px; border-top:1px solid var(--border); flex-shrink:0; }
     .noti-read-btn { width:100%; padding:9px; background:var(--primary); color:#fff; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; font-family:inherit; }
     .noti-read-btn:hover { background:var(--primary-dark); }
@@ -773,7 +774,6 @@
       <span class="user-info">admin | 열람권한자</span>
       <button class="noti-btn" id="notiBtn" aria-label="알림">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
-        <span class="noti-badge" id="notiBadge" style="display: none;">0</span>
       </button>
       <div class="avatar">관</div>
       <button class="logout-btn" onclick="location.href='/login'">
@@ -790,7 +790,7 @@
   <div class="noti-modal" id="notiModal">
     <div class="noti-modal-header">
       <div>
-        <h2>구독 알림</h2>
+        <h2>알림</h2>
         <div class="noti-date" id="notiModalDate"></div>
       </div>
       <button class="noti-close-btn" onclick="closeNotiModal()">&times;</button>
@@ -1031,8 +1031,7 @@
           lastBtn: document.getElementById("lastBtn"),
           pageButtons: document.getElementById("pageButtons"),
           resetBtn: document.getElementById("resetBtn"),
-          notiBtn: document.getElementById("notiBtn"),
-          notiBadge: document.getElementById("notiBadge")
+          notiBtn: document.getElementById("notiBtn")
         };
       }
 
@@ -1046,21 +1045,10 @@
 
       async checkTodayNotifications() {
         try {
-          // Check how many items were published today
-          const today = this.formatYmd(new Date());
-          const query = new URLSearchParams({ page: "1", page_size: "1", from_date: today, to_date: today });
-          const data = await this.api.getJson(`/api/articles?${query}`);
-          const todayCount = data.total || 0;
-
-          // Check if user already read the notifications today
-          const lastReadDate = localStorage.getItem("lastReadNotiDate");
-
-          if (todayCount > 0 && lastReadDate !== today) {
-            this.el.notiBadge.style.display = "flex";
-            this.el.notiBadge.textContent = todayCount > 9 ? "9+" : todayCount;
-          } else {
-            this.el.notiBadge.style.display = "none";
-          }
+          // Prefetch to warm API path, but keep top-right icon clean (no numeric badge).
+          const lastRead = localStorage.getItem("lastReadNotiDate") || "";
+          const url = lastRead ? `/api/notifications?since=${encodeURIComponent(lastRead)}` : `/api/notifications`;
+          await this.api.getJson(url);
         } catch (e) {
           console.error("Failed to check notifications", e);
         }
@@ -1418,28 +1406,21 @@
     }
 
     function renderNotiBody(data, body) {
-      const groups = data.groups || [];
-      if (!groups.length || data.total === 0) {
+      const entries = data.entries || [];
+      if (!entries.length || data.total === 0) {
         body.innerHTML = `<div class="noti-empty">읽지 않은 알림이 없습니다.</div>`;
         document.getElementById("notiReadBtn").style.display = "none";
         return;
       }
 
-      const allItems = [];
-      groups.forEach(g => {
-        g.items.forEach(it => {
-          allItems.push({ org: g.organization, type: it.type, count: it.count });
-        });
-      });
-
       document.getElementById("notiReadBtn").style.display = "";
-      body.innerHTML = `<ul class="noti-list">` + allItems.map(it => `
+      body.innerHTML = `<ul class="noti-list">` + entries.map(it => `
         <li class="noti-list-item">
-          <div class="noti-item-left">
-            <span class="noti-org">${TextUtil.safe(it.org)}</span>
+          <div class="noti-item-meta">
+            <span class="noti-org">${TextUtil.safe(it.organization)}</span>
             <span class="noti-type">${TextUtil.safe(it.type)}</span>
           </div>
-          <span class="noti-badge">${it.count}건</span>
+          <a class="noti-title-link" href="${TextUtil.escapeHtml(it.url || '#')}">${TextUtil.safe(it.title)}</a>
         </li>`).join("") + `</ul>`;
     }
 
@@ -1452,8 +1433,6 @@
       const d = new Date();
       const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       localStorage.setItem("lastReadNotiDate", today);
-      const badge = document.getElementById("notiBadge");
-      if (badge) badge.style.display = "none";
       const body = document.getElementById("notiModalBody");
       body.innerHTML = `<div class="noti-empty">읽지 않은 알림이 없습니다.</div>`;
       document.getElementById("notiReadBtn").style.display = "none";

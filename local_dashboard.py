@@ -842,6 +842,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 params,
             ).fetchall()
 
+            entry_rows = conn.execute(
+                f"""
+                SELECT
+                    COALESCE(a.organization, '(기관 없음)') AS org,
+                    {type_case} AS type_label,
+                    COALESCE(a.title, '(제목 없음)') AS title,
+                    COALESCE(a.detail_url, a.original_url, '') AS url,
+                    a.published_at AS published_at
+                FROM articles a
+                WHERE {where}
+                ORDER BY COALESCE(a.published_at, '') DESC, a.id DESC
+                LIMIT 200
+                """,
+                params,
+            ).fetchall()
+
             from collections import defaultdict
             grouped = defaultdict(list)
             for row in rows:
@@ -850,7 +866,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 {"organization": org, "items": items}
                 for org, items in sorted(grouped.items(), key=lambda x: -sum(i["count"] for i in x[1]))
             ]
-            self._json_response({"total": total, "groups": result})
+            entries = [
+                {
+                    "organization": row["org"],
+                    "type": row["type_label"],
+                    "title": row["title"],
+                    "url": row["url"],
+                    "published_at": row["published_at"],
+                }
+                for row in entry_rows
+            ]
+            self._json_response({"total": total, "groups": result, "entries": entries})
         finally:
             conn.close()
 
