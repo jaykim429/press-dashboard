@@ -381,12 +381,26 @@ class HttpClient:
     def __init__(self, timeout: Tuple[int, int] = TIMEOUT, max_retries: int = MAX_RETRIES):
         self.timeout = timeout
         self.max_retries = max_retries
+        self.session = requests.Session()
+        self.default_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
 
-    def get(self, url: str, params: Optional[Dict[str, Any]] = None) -> requests.Response:
+    def _merged_headers(self, headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        merged = dict(self.default_headers)
+        if headers:
+            merged.update(headers)
+        return merged
+
+    def _request_with_retries(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         last_error: Optional[Exception] = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                resp = requests.get(url, params=params, timeout=self.timeout)
+                resp = self.session.request(method=method, url=url, timeout=self.timeout, **kwargs)
                 resp.raise_for_status()
                 return resp
             except requests.RequestException as exc:
@@ -396,6 +410,34 @@ class HttpClient:
         if last_error is None:
             raise RuntimeError("Unknown HTTP error")
         raise last_error
+
+    def get(
+        self,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> requests.Response:
+        return self._request_with_retries(
+            "GET",
+            url,
+            params=params,
+            headers=self._merged_headers(headers),
+        )
+
+    def post(
+        self,
+        url: str,
+        data: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> requests.Response:
+        return self._request_with_retries(
+            "POST",
+            url,
+            data=data,
+            json=json_data,
+            headers=self._merged_headers(headers),
+        )
 
 
 class ArticleRepository:
@@ -1174,12 +1216,14 @@ FSC_ADMIN_CHANNELS = {
     "fsc_admin_guidance_notice": {
         "name": "\ud589\uc815\uc9c0\ub3c4 \uc608\uace0",
         "mu_no": "144",
+        "list_referer_path": "/fsc_new/status/adminMap/PrvntcList.do?stNo=11&muNo=144&muGpNo=60",
         "list_path": "/fsc_new/status/adminMap/selectPrvntcList.do?actCd=R",
         "detail_path": "/fsc_new/status/adminMap/PrvntcDetail.do",
     },
     "fsc_admin_guidance_enforcement": {
         "name": "\ud589\uc815\uc9c0\ub3c4 \uc2dc\ud589",
         "mu_no": "145",
+        "list_referer_path": "/fsc_new/status/adminMap/OpertnList.do?stNo=11&muNo=145&muGpNo=60",
         "list_path": "/fsc_new/status/adminMap/selectOpertnList.do?actCd=R",
         "detail_path": "/fsc_new/status/adminMap/OpertnDetail.do",
     },
@@ -1187,13 +1231,16 @@ FSC_ADMIN_CHANNELS = {
 
 
 class FscAdminGuidanceCollector:
-    def __init__(self, base_url: str = FSC_ADMIN_BASE, sleep_sec: float = 0.05):
+    def __init__(self, http: HttpClient, base_url: str = FSC_ADMIN_BASE, sleep_sec: float = 0.05):
+        self.http = http
         self.base_url = base_url
         self.sleep_sec = sleep_sec
 
-    def _post_json(self, path: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        resp = requests.post(urljoin(self.base_url, path), data=data, timeout=TIMEOUT)
-        resp.raise_for_status()
+    def _post_json(self, path: str, data: Dict[str, Any], referer: Optional[str] = None) -> Dict[str, Any]:
+        headers = {"X-Requested-With": "XMLHttpRequest"}
+        if referer:
+            headers["Referer"] = referer
+        resp = self.http.post(urljoin(self.base_url, path), data=data, headers=headers)
         return resp.json()
 
     def _fetch_list_page(self, config: Dict[str, str], page: int) -> Dict[str, Any]:
@@ -1213,7 +1260,8 @@ class FscAdminGuidanceCollector:
             "searchAddFild4": "",
             "muNo": config["mu_no"],
         }
-        return self._post_json(config["list_path"], payload)
+        referer = urljoin(self.base_url, config.get("list_referer_path", ""))
+        return self._post_json(config["list_path"], payload, referer=referer)
 
     def _th_text(self, soup: BeautifulSoup, label: str) -> Optional[str]:
         for th in soup.select("th"):
@@ -1234,8 +1282,11 @@ class FscAdminGuidanceCollector:
             "prevTab2": "",
             "actCd": "R",
         }
-        resp = requests.post(urljoin(self.base_url, config["detail_path"]), data=payload, timeout=TIMEOUT)
-        resp.raise_for_status()
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": urljoin(self.base_url, config.get("list_referer_path", "")),
+        }
+        resp = self.http.post(urljoin(self.base_url, config["detail_path"]), data=payload, headers=headers)
         soup = BeautifulSoup(resp.text, "html.parser")
         view = soup.select_one(".board-view") or soup
         content_node = view.select_one(".contents") or view.select_one(".cont") or view
@@ -1256,15 +1307,26 @@ class FscAdminGuidanceCollector:
 
     def ingest(self, max_pages: int = 1) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
+        failed_channels: List[str] = []
         for channel, config in FSC_ADMIN_CHANNELS.items():
-            first = self._fetch_list_page(config, 1)
+            try:
+                first = self._fetch_list_page(config, 1)
+            except Exception as e:
+                print(f"[WARN] [FSC-ADMIN:{config['name']}] list page 1 failed: {e}")
+                failed_channels.append(channel)
+                continue
+
             total = int(first.get("recordsTotal") or 0)
             pages_total = max(1, (total + 9) // 10)
             pages = min(pages_total, max_pages) if max_pages else pages_total
             print(f"[FSC-ADMIN:{config['name']}] page 1/{pages}: {len(first.get('data') or [])} items")
             rows = list(first.get("data") or [])
             for page in range(2, pages + 1):
-                data = self._fetch_list_page(config, page)
+                try:
+                    data = self._fetch_list_page(config, page)
+                except Exception as e:
+                    print(f"[WARN] [FSC-ADMIN:{config['name']}] list page {page}/{pages} failed: {e}")
+                    continue
                 page_rows = data.get("data") or []
                 print(f"[FSC-ADMIN:{config['name']}] page {page}/{pages}: {len(page_rows)} items")
                 rows.extend(page_rows)
@@ -1329,6 +1391,9 @@ class FscAdminGuidanceCollector:
                     }
                 )
                 time.sleep(self.sleep_sec)
+
+        if failed_channels and len(failed_channels) == len(FSC_ADMIN_CHANNELS):
+            raise RuntimeError("FSC Admin list endpoints failed for all channels")
         return out
 
 
@@ -1543,13 +1608,16 @@ FSC_REPLY_CASE_CHANNELS = {
 
 
 class FscReplyCaseCollector:
-    def __init__(self, base_url: str = FSC_ADMIN_BASE, sleep_sec: float = 0.05):
+    def __init__(self, http: HttpClient, base_url: str = FSC_ADMIN_BASE, sleep_sec: float = 0.05):
+        self.http = http
         self.base_url = base_url
         self.sleep_sec = sleep_sec
 
-    def _post_json(self, path: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        resp = requests.post(urljoin(self.base_url, path), data=data, timeout=TIMEOUT)
-        resp.raise_for_status()
+    def _post_json(self, path: str, data: Dict[str, Any], referer: Optional[str] = None) -> Dict[str, Any]:
+        headers = {"X-Requested-With": "XMLHttpRequest"}
+        if referer:
+            headers["Referer"] = referer
+        resp = self.http.post(urljoin(self.base_url, path), data=data, headers=headers)
         return resp.json()
 
     def _fetch_list_page(self, config: Dict[str, str], page: int) -> Dict[str, Any]:
@@ -1567,7 +1635,7 @@ class FscReplyCaseCollector:
             "searchLawType": "",
             "searchChartIdx": "",
         }
-        return self._post_json(config["list_path"], payload)
+        return self._post_json(config["list_path"], payload, referer=urljoin(self.base_url, "/fsc_new/replyCase/List.do"))
 
     def _th_map(self, soup: BeautifulSoup) -> Dict[str, str]:
         out: Dict[str, str] = {}
@@ -1601,8 +1669,11 @@ class FscReplyCaseCollector:
 
     def _fetch_detail(self, config: Dict[str, str], item_id: str) -> Dict[str, Any]:
         payload = {"muNo": config["mu_no"], "stNo": "11", config["id_key"]: str(item_id), "actCd": "R"}
-        resp = requests.post(urljoin(self.base_url, config["detail_path"]), data=payload, timeout=TIMEOUT)
-        resp.raise_for_status()
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": urljoin(self.base_url, "/fsc_new/replyCase/List.do"),
+        }
+        resp = self.http.post(urljoin(self.base_url, config["detail_path"]), data=payload, headers=headers)
         soup = BeautifulSoup(resp.text, "html.parser")
         meta = self._th_map(soup)
         content_html, content_text = self._build_content(meta)
@@ -1616,15 +1687,26 @@ class FscReplyCaseCollector:
 
     def ingest(self, max_pages: int = 1) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
+        failed_channels: List[str] = []
         for channel, config in FSC_REPLY_CASE_CHANNELS.items():
-            first = self._fetch_list_page(config, 1)
+            try:
+                first = self._fetch_list_page(config, 1)
+            except Exception as e:
+                print(f"[WARN] [FSC-REPLY:{config['name']}] list page 1 failed: {e}")
+                failed_channels.append(channel)
+                continue
+
             total = int(first.get("recordsTotal") or 0)
             pages_total = max(1, (total + 9) // 10)
             pages = min(pages_total, max_pages) if max_pages else pages_total
             rows = list(first.get("data") or [])
             print(f"[FSC-REPLY:{config['name']}] page 1/{pages}: {len(rows)} items")
             for page in range(2, pages + 1):
-                data = self._fetch_list_page(config, page)
+                try:
+                    data = self._fetch_list_page(config, page)
+                except Exception as e:
+                    print(f"[WARN] [FSC-REPLY:{config['name']}] list page {page}/{pages} failed: {e}")
+                    continue
                 page_rows = data.get("data") or []
                 print(f"[FSC-REPLY:{config['name']}] page {page}/{pages}: {len(page_rows)} items")
                 rows.extend(page_rows)
@@ -1676,6 +1758,9 @@ class FscReplyCaseCollector:
                     }
                 )
                 time.sleep(self.sleep_sec)
+
+        if failed_channels and len(failed_channels) == len(FSC_REPLY_CASE_CHANNELS):
+            raise RuntimeError("FSC ReplyCase list endpoints failed for all channels")
         return out
 
 
@@ -2853,8 +2938,8 @@ class UnifiedPressIngestService:
         self.fss_collector = fss_collector or FssCollector(self.http)
         self.ksd_collector = ksd_collector or KsdCollector(self.http)
         self.fsc_collector = fsc_collector or FscCollector(self.http)
-        self.fsc_admin_collector = fsc_admin_collector or FscAdminGuidanceCollector()
-        self.fsc_reply_collector = fsc_reply_collector or FscReplyCaseCollector()
+        self.fsc_admin_collector = fsc_admin_collector or FscAdminGuidanceCollector(self.http)
+        self.fsc_reply_collector = fsc_reply_collector or FscReplyCaseCollector(self.http)
         self.bok_collector = bok_collector or BokCollector(self.http)
         self.kfb_collector = kfb_collector or KfbCollector(self.http)
         self.fsec_collector = fsec_collector or FsecCollector(self.http)
