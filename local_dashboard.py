@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import difflib
 import json
 import math
@@ -36,7 +36,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
     login_pw = "test123"
     _kiwi = None
     _stats_cache = {}    # {(title_q, press_type, org, from, to): (timestamp, data)}
-    _keywords_cache = {} # {(top_n): (timestamp, data)}
     CACHE_TTL = 300      # 5 minutes
     PRESS_TYPE_CHANNELS = {
         "press_release": [
@@ -198,10 +197,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.handle_similar(qs)
             return
 
-        if path == "/api/keywords":
+        if path == "/api/suggest":
             if not self._require_auth_api():
                 return
-            self.handle_keywords(qs)
+            self.handle_suggest(qs)
             return
         if path == "/api/stats":
             if not self._require_auth_api():
@@ -770,270 +769,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return score
         return score if score >= 0.16 else 0.0
 
-    def handle_keywords(self, qs):
-        now = time.time()
-        if "keywords" in self._keywords_cache:
-            ts, cached = self._keywords_cache["keywords"]
-            if now - ts < self.CACHE_TTL:
-                self._json_response(cached)
-                return
-
+    def handle_suggest(self, qs):
+        q = (qs.get("q", [""])[0] or "").strip()
+        if len(q) < 2:
+            self._json_response({"items": []})
+            return
+        clean_q = re.sub(r'[^\w\s]', ' ', q).strip()
+        if not clean_q:
+            self._json_response({"items": []})
+            return
+        words = clean_q.split()
+        match_query = " AND ".join(f'"{w}"*' for w in words)
         conn = self._db()
         try:
-            # Check if precomputed table exists and has data
-            try:
-                rows = conn.execute("SELECT keyword, score FROM precomputed_keywords ORDER BY score DESC LIMIT 12").fetchall()
-                if rows:
-                    payload = [{"keyword": r["keyword"], "score": r["score"]} for r in rows]
-                    self._keywords_cache["keywords"] = (now, payload)
-                    self._json_response(payload)
-                    return
-            except sqlite3.OperationalError:
-                pass  # Table might not exist yet if ingest hasn't run
-            
-            # Fallback to empty if not yet precomputed
-            payload = []
-            self._keywords_cache["keywords"] = (now, payload)
-            self._json_response(payload)
-        finally:
-            conn.close()
-
-
-    def handle_notifications(self, qs):
-        """Return today's new articles grouped by organization and type."""
-        since_date = (qs.get("since", [""])[0] or "").strip()
-        conn = self._db()
-        try:
-            date_expr = "date(a.published_at)"
-            if since_date:
-                where = f"{date_expr} > date(?)"
-                params = [since_date]
-            else:
-                # Use fixed KST date baseline to avoid server timezone drift.
-                where = f"{date_expr} = date('now', '+9 hours')"
-                params = []
-
-            type_case = """
-                CASE
-                    WHEN source_channel IN ('fss_press_explainer','fsc_press_explainer') THEN '보도설명자료'
-                    WHEN source_channel IN ('fsc_admin_guidance_notice','fss_admin_guidance_notice') THEN '행정지도 예고'
-                    WHEN source_channel IN ('fsc_admin_guidance_enforcement','fss_admin_guidance_enforcement') THEN '행정지도 시행'
-                    WHEN source_channel = 'fsc_law_interpretation' THEN '법령해석'
-                    WHEN source_channel = 'fsc_no_action_opinion' THEN '비조치의견서'
-                    WHEN source_channel IN ('fsc_rule_change_notice','ksd_rule_change_notice','krx_rule_change_notice','kofia_rule_change_notice') THEN '규정 제개정 예고'
-                    WHEN source_channel IN ('fsc_regulation_notice','krx_recent_rule_change','kofia_recent_rule_change') THEN '최신 제·개정 정보'
-                    WHEN source_channel IN ('kfb_publicdata_other','fsec_bbs_222') THEN '기타자료'
-                    ELSE '보도자료'
-                END
-            """
-
-            total = conn.execute(f"SELECT COUNT(*) FROM articles a WHERE {where}", params).fetchone()[0]
             rows = conn.execute(
-                f"""
-                SELECT
-                    COALESCE(a.organization, '(기관 없음)') AS org,
-                    {type_case} AS type_label,
-                    COUNT(*) AS cnt
+                """
+                SELECT DISTINCT a.title
                 FROM articles a
-                WHERE {where}
-                GROUP BY org, type_label
-                ORDER BY cnt DESC, org ASC
+                JOIN articles_fts f ON a.id = f.rowid
+                WHERE f.articles_fts MATCH ?
+                ORDER BY a.published_at DESC
+                LIMIT 8
                 """,
-                params,
+                (match_query,),
             ).fetchall()
-
-            entry_rows = conn.execute(
-                f"""
-                SELECT
-                    COALESCE(a.organization, '(기관 없음)') AS org,
-                    {type_case} AS type_label,
-                    COALESCE(a.title, '(제목 없음)') AS title,
-                    COALESCE(a.detail_url, a.original_url, '') AS url,
-                    a.published_at AS published_at
-                FROM articles a
-                WHERE {where}
-                ORDER BY COALESCE(a.published_at, '') DESC, a.id DESC
-                LIMIT 200
-                """,
-                params,
-            ).fetchall()
-
-            from collections import defaultdict
-            grouped = defaultdict(list)
-            for row in rows:
-                grouped[row["org"]].append({"type": row["type_label"], "count": row["cnt"]})
-            result = [
-                {"organization": org, "items": items}
-                for org, items in sorted(grouped.items(), key=lambda x: -sum(i["count"] for i in x[1]))
-            ]
-            entries = [
-                {
-                    "organization": row["org"],
-                    "type": row["type_label"],
-                    "title": row["title"],
-                    "url": row["url"],
-                    "published_at": row["published_at"],
-                }
-                for row in entry_rows
-            ]
-            self._json_response({"total": total, "groups": result, "entries": entries})
+            self._json_response({"items": [r["title"] for r in rows]})
+        except Exception:
+            self._json_response({"items": []})
         finally:
             conn.close()
 
-    @classmethod
-    def _get_kiwi(cls):
-        if Kiwi is None:
-            return None
-        if cls._kiwi is None:
-            try:
-                cls._kiwi = Kiwi()
-            except Exception:
-                cls._kiwi = None
-        return cls._kiwi
-
-    @staticmethod
-    def _stopwords():
-        return {
-            "\ubcf4\ub3c4\uc790\ub8cc",
-            "\ubcf4\ub3c4",
-            "\uc790\ub8cc",
-            "\uae08\uc735",
-            "\uc704\uc6d0\ud68c",
-            "\uae08\uc735\uc704\uc6d0\ud68c",
-            "\uae08\uc735\uac10\ub3c5\uc6d0",
-            "\ud55c\uad6d\uc740\ud589",
-            "\ud55c\uad6d\uc608\ud0c1\uacb0\uc81c\uc6d0",
-            "\uad00\ub828",
-            "\uac1c\ucd5c",
-            "\ubc1c\ud45c",
-            "\uc548\ub0b4",
-            "\uc2dc\ud589",
-            "\ub300\ud55c",
-            "\uc704\ud55c",
-            "\uc5d0\uc11c",
-            "\uc73c\ub85c",
-            "\uae30\uc900",
-            "\uc624\ub298",
-            "\ucd5c\uadfc",
-            "\ub2e4\uc6b4\ub85c\ub4dc",
-            "\ubc14\ub78d\ub2c8\ub2e4",
-            "\ud569\ub2c8\ub2e4",
-        }
-
-    @classmethod
-    def _extract_keywords_with_kiwi_bm25(cls, rows, top_n=12):
-        kiwi = cls._get_kiwi()
-        if kiwi is None:
-            return None
-
-        stopwords = cls._stopwords()
-        hangul_only = re.compile(r"^[\uAC00-\uD7A3]{2,}$")
-        docs = []
-
-        def tokenize(text: str):
-            if not text:
-                return []
-            try:
-                tokens = kiwi.tokenize(text)
-            except Exception:
-                return []
-            out = []
-            for tok in tokens:
-                if not str(tok.tag).startswith("N"):
-                    continue
-                word = (tok.form or "").strip()
-                if len(word) < 2:
-                    continue
-                if any(ch.isdigit() for ch in word):
-                    continue
-                if not hangul_only.match(word):
-                    continue
-                if word in stopwords:
-                    continue
-                out.append(word)
-            return out
-
-        for row in rows:
-            tf = Counter()
-            for token in tokenize(row["title"] or ""):
-                tf[token] += 3  # title-first weighting
-            for token in tokenize(row["content_text"] or ""):
-                tf[token] += 1
-            if not tf:
-                continue
-            docs.append(tf)
-
-        return cls._rank_keywords_bm25(docs, top_n=top_n)
-
-    @classmethod
-    def _extract_keywords_with_regex_bm25(cls, rows, top_n=12):
-        token_pattern = re.compile(r"[\uAC00-\uD7A3A-Za-z]{2,}")
-        stopwords = cls._stopwords()
-        docs = []
-
-        for row in rows:
-            title = row["title"] or ""
-            body = row["content_text"] or ""
-            tf = Counter()
-
-            for token in token_pattern.findall(title):
-                if token in stopwords:
-                    continue
-                if any(ch.isdigit() for ch in token):
-                    continue
-                tf[token] += 3
-
-            for token in token_pattern.findall(body):
-                if token in stopwords:
-                    continue
-                if any(ch.isdigit() for ch in token):
-                    continue
-                tf[token] += 1
-
-            if tf:
-                docs.append(tf)
-
-        return cls._rank_keywords_bm25(docs, top_n=top_n)
-
-    @staticmethod
-    def _rank_keywords_bm25(docs, top_n=12, k1=1.5, b=0.75):
-        if not docs:
-            return []
-
-        n_docs = len(docs)
-        doc_lengths = [sum(tf.values()) for tf in docs]
-        avgdl = (sum(doc_lengths) / n_docs) if n_docs else 0.0
-        if avgdl <= 0:
-            return []
-
-        df = Counter()
-        for tf in docs:
-            for term in tf.keys():
-                df[term] += 1
-
-        scores = Counter()
-        for term, df_t in df.items():
-            # Robertson/Sparck Jones IDF (BM25)
-            idf = math.log(1.0 + (n_docs - df_t + 0.5) / (df_t + 0.5))
-            for i, tf in enumerate(docs):
-                f = tf.get(term, 0)
-                if f <= 0:
-                    continue
-                dl = doc_lengths[i]
-                denom = f + k1 * (1.0 - b + b * (dl / avgdl))
-                if denom <= 0:
-                    continue
-                scores[term] += idf * (f * (k1 + 1.0) / denom)
-
-        ranked = scores.most_common(top_n)
-        return [{"keyword": k, "score": round(v, 4)} for k, v in ranked]
-
-    @classmethod
-    def _extract_keywords(cls, rows, top_n=12):
-        items = cls._extract_keywords_with_kiwi_bm25(rows, top_n=top_n)
-        if items is not None:
-            return items
-        return cls._extract_keywords_with_regex_bm25(rows, top_n=top_n)
 
 
 def main():

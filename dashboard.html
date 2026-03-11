@@ -395,63 +395,6 @@
       color: var(--gray-090);
     }
     
-    /* Keyword Panel */
-    .keyword-panel {
-      background: #ffffff;
-      border: 1px solid var(--border);
-      border-radius: var(--radius-m);
-      padding: 20px;
-      margin-bottom: 24px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.02);
-    }
-
-    .keyword-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 16px;
-    }
-
-    .keyword-title {
-      font-size: 15px;
-      font-weight: 700;
-      margin: 0;
-      color: #111;
-    }
-
-    .keyword-sub {
-      font-size: 14px;
-      color: var(--gray-060);
-    }
-
-    .keyword-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-
-    .keyword-chip {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      color: var(--primary);
-      padding: 8px 16px;
-      border-radius: 20px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-      font-family: inherit;
-    }
-
-    .keyword-chip:hover {
-      border-color: var(--primary);
-      background: var(--primary-bg);
-    }
-    
-    .keyword-empty {
-      color: var(--gray-060); font-size: 13px;
-    }
-
     .stat-toggle-btn {
       background: none;
       border: none;
@@ -746,6 +689,21 @@
       cursor: not-allowed;
     }
 
+
+    /* Suggest Dropdown */
+    .search-wrap { position: relative; }
+    .suggest-list {
+      display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+      background: #fff; border: 1px solid var(--border); border-radius: var(--radius-s);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.08); z-index: 200; list-style: none;
+      max-height: 280px; overflow-y: auto;
+    }
+    .suggest-list.open { display: block; }
+    .suggest-item {
+      padding: 10px 16px; font-size: 14px; cursor: pointer; color: var(--black-010);
+    }
+    .suggest-item:hover { background: var(--surface); }
+
     @media (max-width: 1024px) {
       .list-container { 
         display: flex;
@@ -806,17 +764,6 @@
   <div class="main-container">
     <!-- Top Content Area -->
     <div class="top-content">
-      <!-- Keyword Panel -->
-      <section class="keyword-panel" aria-label="오늘의 키워드">
-        <div class="keyword-head">
-          <h2 class="keyword-title">오늘의 키워드</h2>
-          <span class="keyword-sub" id="keywordSub" style="display:none"></span>
-        </div>
-        <div class="keyword-row" id="keywordRow">
-          <span class="keyword-empty">키워드를 불러오는 중입니다...</span>
-        </div>
-      </section>
-
       <!-- Stats Grid -->
       <section class="stats-grid" aria-label="통계">
         <article class="stat-card">
@@ -888,9 +835,12 @@
       <!-- Main Data Area -->
       <main class="content">
         <!-- Search Box -->
-        <div class="search-box">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-          <input type="text" id="q" class="search-input" placeholder="검색어를 입력하세요. ex) 보도자료명, 주요 키워드" />
+        <div class="search-wrap">
+          <div class="search-box">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="q" class="search-input" placeholder="검색어를 입력하세요. ex) 보도자료명, 주요 키워드" autocomplete="off" />
+          </div>
+          <ul class="suggest-list" id="suggestList"></ul>
         </div>
 
         <div class="list-header">
@@ -1017,8 +967,6 @@
           sort: document.getElementById("sort"),
           pageSize: document.getElementById("pageSize"),
           periodRadios: Array.from(document.querySelectorAll("input[name='period']")),
-          keywordRow: document.getElementById("keywordRow"),
-          keywordSub: document.getElementById("keywordSub"),
           typeStatSub: document.getElementById("typeStatSub"),
           typeStatList: document.getElementById("typeStatList"),
           orgStatList: document.getElementById("orgStatList"),
@@ -1038,7 +986,6 @@
       async init() {
         this.bindEvents();
         await this.loadFilters();
-        await this.loadKeywords();
         await this.checkTodayNotifications();
         await this.loadArticles();
       }
@@ -1077,9 +1024,9 @@
         });
         this.el.organization.addEventListener("change", () => this.search());
         this.el.pressType.addEventListener("change", () => this.search());
-        this.el.keywordRow.addEventListener("click", (e) => this.onKeywordClicked(e));
         
         this.el.notiBtn.addEventListener("click", () => showNotiModal());
+        this._bindSuggest();
       }
 
       async loadFilters() {
@@ -1098,32 +1045,6 @@
         } catch (e) {
             console.error("Failed to load filters", e);
         }
-      }
-
-      async loadKeywords() {
-        try {
-          const data = await this.api.getJson(`/api/keywords?top_n=12`);
-          const items = Array.isArray(data) ? data : (data.items || []);
-          this.el.keywordSub.textContent = `오늘 기준 · 클릭하면 바로 검색`;
-          if (!items.length) {
-            this.el.keywordRow.innerHTML = `<span class="keyword-empty">표시할 키워드가 없습니다.</span>`;
-            return;
-          }
-          this.el.keywordRow.innerHTML = items
-            .map((x) => `<button type="button" class="keyword-chip" data-keyword="${TextUtil.escapeHtml(x.keyword || "")}">${TextUtil.safe(x.keyword || "")}</button>`)
-            .join("");
-        } catch (_) {
-          this.el.keywordRow.innerHTML = `<span class="keyword-empty">키워드를 불러오지 못했습니다.</span>`;
-        }
-      }
-
-      async onKeywordClicked(e) {
-        const btn = e.target.closest(".keyword-chip");
-        if (!btn) return;
-        const keyword = (btn.dataset.keyword || "").trim();
-        if (!keyword) return;
-        this.el.q.value = keyword;
-        await this.search();
       }
 
       buildQueryString(includePage = true) {
@@ -1369,6 +1290,46 @@
       }
     }
 
+
+      _bindSuggest() {
+        const input = this.el.q;
+        const list  = document.getElementById("suggestList");
+        let timer = null;
+
+        input.addEventListener("input", () => {
+          clearTimeout(timer);
+          const q = input.value.trim();
+          if (q.length < 2) { list.classList.remove("open"); list.innerHTML = ""; return; }
+          timer = setTimeout(async () => {
+            try {
+              const data = await this.api.getJson(`/api/suggest?q=${encodeURIComponent(q)}`);
+              const items = data.items || [];
+              if (!items.length) { list.classList.remove("open"); list.innerHTML = ""; return; }
+              list.innerHTML = items.map(t =>
+                `<li class="suggest-item" data-title="${TextUtil.escapeHtml(t)}">${TextUtil.safe(t)}</li>`
+              ).join("");
+              list.classList.add("open");
+            } catch(_) {}
+          }, 300);
+        });
+
+        list.addEventListener("click", async (e) => {
+          const item = e.target.closest(".suggest-item");
+          if (!item) return;
+          input.value = item.dataset.title || "";
+          list.classList.remove("open"); list.innerHTML = "";
+          await this.search();
+        });
+
+        document.addEventListener("click", (e) => {
+          if (!e.target.closest(".search-wrap")) { list.classList.remove("open"); }
+        });
+
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Escape") { list.classList.remove("open"); }
+        });
+      }
+
     function toggleStat(listId, btnId) {
       const list = document.getElementById(listId);
       const btn = document.getElementById(btnId);
@@ -1420,7 +1381,7 @@
             <span class="noti-org">${TextUtil.safe(it.organization)}</span>
             <span class="noti-type">${TextUtil.safe(it.type)}</span>
           </div>
-          <a class="noti-title-link" href="${TextUtil.escapeHtml(it.url || '#')}">${TextUtil.safe(it.title)}</a>
+          <a class="noti-title-link" href="/article?id=${it.id || ''}">${TextUtil.safe(it.title)}</a>
         </li>`).join("") + `</ul>`;
     }
 
