@@ -1,9 +1,10 @@
-﻿import argparse
+import argparse
 import difflib
 import json
 import math
 import re
 import smtplib
+import socketserver
 import sqlite3
 import time
 from collections import Counter
@@ -25,6 +26,10 @@ HTML_PATH = BASE_DIR / "dashboard.html"
 ARTICLE_HTML_PATH = BASE_DIR / "article.html"
 CGIN_LOGO_PATH = BASE_DIR / "cgin_logo.png"
 ADMIN_HTML_PATH = BASE_DIR / "admin.html"
+
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
@@ -1217,7 +1222,7 @@ def main():
         raise FileNotFoundError(f"DB not found: {db_path}")
 
     DashboardHandler.db_path = str(db_path)
-    server = HTTPServer((args.host, args.port), DashboardHandler)
+    server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     print(f"Dashboard running: http://{args.host}:{args.port}")
     print(f"DB: {db_path}")
     try:
