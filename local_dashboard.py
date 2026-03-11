@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import difflib
 import json
 import math
@@ -769,6 +769,89 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return score
         return score if score >= 0.16 else 0.0
 
+    def handle_notifications(self, qs):
+        """Return today's new articles grouped by organization and type."""
+        since_date = (qs.get("since", [""])[0] or "").strip()
+        conn = self._db()
+        try:
+            date_expr = "date(a.published_at)"
+            if since_date:
+                where = f"{date_expr} > date(?)"
+                params = [since_date]
+            else:
+                # Use fixed KST date baseline to avoid server timezone drift.
+                where = f"{date_expr} = date('now', '+9 hours')"
+                params = []
+
+            type_case = """
+                CASE
+                    WHEN source_channel IN ('fss_press_explainer','fsc_press_explainer') THEN '보도설명자료'
+                    WHEN source_channel IN ('fsc_admin_guidance_notice','fss_admin_guidance_notice') THEN '행정지도 예고'
+                    WHEN source_channel IN ('fsc_admin_guidance_enforcement','fss_admin_guidance_enforcement') THEN '행정지도 시행'
+                    WHEN source_channel = 'fsc_law_interpretation' THEN '법령해석'
+                    WHEN source_channel = 'fsc_no_action_opinion' THEN '비조치의견서'
+                    WHEN source_channel IN ('fsc_rule_change_notice','ksd_rule_change_notice','krx_rule_change_notice','kofia_rule_change_notice') THEN '규정 제개정 예고'
+                    WHEN source_channel IN ('fsc_regulation_notice','krx_recent_rule_change','kofia_recent_rule_change') THEN '최신 제·개정 정보'
+                    WHEN source_channel IN ('kfb_publicdata_other','fsec_bbs_222') THEN '기타자료'
+                    ELSE '보도자료'
+                END
+            """
+
+            total = conn.execute(f"SELECT COUNT(*) FROM articles a WHERE {where}", params).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT
+                    COALESCE(a.organization, '(기관 없음)') AS org,
+                    {type_case} AS type_label,
+                    COUNT(*) AS cnt
+                FROM articles a
+                WHERE {where}
+                GROUP BY org, type_label
+                ORDER BY cnt DESC, org ASC
+                """,
+                params,
+            ).fetchall()
+
+            entry_rows = conn.execute(
+                f"""
+                SELECT
+                    a.id AS id,
+                    COALESCE(a.organization, '(기관 없음)') AS org,
+                    {type_case} AS type_label,
+                    COALESCE(a.title, '(제목 없음)') AS title,
+                    COALESCE(a.detail_url, a.original_url, '') AS url,
+                    a.published_at AS published_at
+                FROM articles a
+                WHERE {where}
+                ORDER BY COALESCE(a.published_at, '') DESC, a.id DESC
+                LIMIT 200
+                """,
+                params,
+            ).fetchall()
+
+            from collections import defaultdict
+            grouped = defaultdict(list)
+            for row in rows:
+                grouped[row["org"]].append({"type": row["type_label"], "count": row["cnt"]})
+            result = [
+                {"organization": org, "items": items}
+                for org, items in sorted(grouped.items(), key=lambda x: -sum(i["count"] for i in x[1]))
+            ]
+            entries = [
+                {
+                    "id": row["id"],
+                    "organization": row["org"],
+                    "type": row["type_label"],
+                    "title": row["title"],
+                    "url": row["url"],
+                    "published_at": row["published_at"],
+                }
+                for row in entry_rows
+            ]
+            self._json_response({"total": total, "groups": result, "entries": entries})
+        finally:
+            conn.close()
+
     def handle_suggest(self, qs):
         q = (qs.get("q", [""])[0] or "").strip()
         if len(q) < 2:
@@ -798,7 +881,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json_response({"items": []})
         finally:
             conn.close()
-
 
 
 def main():
