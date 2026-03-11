@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>관리자 페이지 — 보도자료 대시보드</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --primary: #1a56db;
+      --primary-dark: #1e40af;
+      --surface: #f8fafc;
+      --border: #e2e8f0;
+      --radius: 10px;
+      --danger: #dc2626;
+      --success: #16a34a;
+      --gray: #64748b;
+      --black: #1e293b;
+    }
+    body { font-family: 'Pretendard', 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif; background: #f1f5f9; color: var(--black); min-height: 100vh; }
+
+    /* Header */
+    .header { background: #fff; border-bottom: 1px solid var(--border); padding: 0 32px; height: 60px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+    .header-logo { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 700; color: var(--primary); text-decoration: none; }
+    .header-logo img { height: 32px; }
+    .header-right { display: flex; align-items: center; gap: 12px; }
+    .btn { padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; border: none; display: inline-flex; align-items: center; gap: 6px; transition: all .15s; }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-primary:hover { background: var(--primary-dark); }
+    .btn-outline { background: #fff; color: var(--primary); border: 1px solid var(--primary); }
+    .btn-outline:hover { background: #eff6ff; }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-danger:hover { background: #b91c1c; }
+    .btn-sm { padding: 5px 10px; font-size: 12px; }
+
+    /* Layout */
+    .container { max-width: 1100px; margin: 0 auto; padding: 28px 20px; display: flex; gap: 24px; flex-wrap: wrap; }
+    .main { flex: 1 1 680px; display: flex; flex-direction: column; gap: 20px; }
+    .sidebar { flex: 0 0 300px; display: flex; flex-direction: column; gap: 20px; }
+    .card { background: #fff; border-radius: var(--radius); border: 1px solid var(--border); padding: 20px; }
+    .card-title { font-size: 15px; font-weight: 700; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+    .badge { background: var(--primary); color: #fff; border-radius: 99px; font-size: 11px; font-weight: 700; padding: 2px 8px; }
+
+    /* Date picker */
+    .date-row { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .date-row label { font-size: 13px; font-weight: 600; color: var(--gray); }
+    .date-row input[type=date] { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px; font-family: inherit; }
+
+    /* Summary table */
+    .summary-wrap { overflow-x: auto; }
+    .summary-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .summary-table thead tr { background: var(--primary); color: #fff; }
+    .summary-table th { padding: 10px 12px; text-align: left; font-weight: 600; white-space: nowrap; }
+    .summary-table td { padding: 9px 12px; border-bottom: 1px solid var(--border); }
+    .summary-table tbody tr:nth-child(even) { background: var(--surface); }
+    .summary-table tbody tr:hover { background: #eff6ff; }
+    .summary-table a { color: var(--primary); text-decoration: none; }
+    .summary-table a:hover { text-decoration: underline; }
+    .empty-msg { text-align: center; padding: 32px; color: var(--gray); font-size: 14px; }
+    .total-count { font-size: 13px; color: var(--gray); margin-bottom: 10px; }
+
+    /* action bar */
+    .action-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+    .send-btn-wrap { margin-left: auto; display: flex; gap: 8px; }
+
+    /* Recipients */
+    .recip-form { display: flex; gap: 8px; margin-bottom: 14px; }
+    .recip-form input { flex: 1; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 13px; font-family: inherit; }
+    .recip-form input:focus { outline: none; border-color: var(--primary); }
+    .recip-list { list-style: none; }
+    .recip-item { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .recip-item:last-child { border-bottom: none; }
+    .recip-check { margin-right: 8px; accent-color: var(--primary); width: 16px; height: 16px; cursor: pointer; }
+    .recip-info { flex: 1; }
+    .recip-email { font-weight: 600; color: var(--black); }
+    .recip-name { font-size: 12px; color: var(--gray); }
+
+    /* Toast */
+    .toast { position: fixed; bottom: 24px; right: 24px; background: #1e293b; color: #fff; padding: 12px 20px; border-radius: 10px; font-size: 14px; display: none; z-index: 9999; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+    .toast.show { display: block; animation: slideIn .2s ease; }
+    .toast.err { background: var(--danger); }
+    @keyframes slideIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+
+    /* Loading spinner */
+    .sp { display: inline-block; width: 16px; height: 16px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <a class="header-logo" href="/dashboard">
+      <img src="/cgin_logo.png" alt="씨지인사이드" />
+      관리자
+    </a>
+    <div class="header-right">
+      <a href="/dashboard" class="btn btn-outline">← 대시보드</a>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="main">
+      <div class="card">
+        <div class="card-title">
+          📋 오늘자 보도자료 요약표
+          <span class="badge" id="summaryCountBadge">0</span>
+        </div>
+        <div class="date-row">
+          <label>날짜</label>
+          <input type="date" id="summaryDate" />
+          <button class="btn btn-outline btn-sm" onclick="loadSummary()">불러오기</button>
+        </div>
+        <div class="action-bar">
+          <span class="total-count" id="summaryInfo">-</span>
+          <div class="send-btn-wrap">
+            <button class="btn btn-primary btn-sm" onclick="sendSummaryEmail()" id="sendSummaryBtn">
+              📧 요약표 이메일 발송
+            </button>
+          </div>
+        </div>
+        <div class="summary-wrap">
+          <table class="summary-table" id="summaryTable">
+            <thead>
+              <tr>
+                <th>기관</th>
+                <th>유형</th>
+                <th>제목</th>
+                <th style="width:56px;text-align:center;">링크</th>
+                <th style="width:48px;text-align:center;">발송</th>
+              </tr>
+            </thead>
+            <tbody id="summaryBody">
+              <tr><td colspan="5" class="empty-msg">날짜를 선택하고 불러오기를 눌러주세요.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar">
+      <div class="card">
+        <div class="card-title">📧 수신자 관리</div>
+        <div class="recip-form">
+          <input type="email" id="newEmail" placeholder="이메일 주소" />
+          <input type="text" id="newName" placeholder="이름 (선택)" style="max-width:90px;" />
+          <button class="btn btn-primary btn-sm" onclick="addRecipient()">추가</button>
+        </div>
+        <ul class="recip-list" id="recipientList">
+          <li class="empty-msg">수신자가 없습니다.</li>
+        </ul>
+        <div style="margin-top:12px; display:flex; justify-content:flex-end; gap:8px;">
+          <button class="btn btn-outline btn-sm" onclick="toggleAllRecipients()">전체 선택</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    let _summaryItems = [];
+    let _recipients = [];
+    let _allSelected = false;
+
+    // Set default date to today
+    const todayISO = new Date().toLocaleDateString('sv-SE');
+    document.getElementById('summaryDate').value = todayISO;
+
+    async function api(method, url, body) {
+      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch(url, opts);
+      return res.json();
+    }
+
+    function showToast(msg, isErr = false) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = 'toast show' + (isErr ? ' err' : '');
+      clearTimeout(t._timer);
+      t._timer = setTimeout(() => t.classList.remove('show'), 3000);
+    }
+
+    async function loadSummary() {
+      const date = document.getElementById('summaryDate').value;
+      const data = await api('GET', `/api/today-summary?date=${date}`);
+      _summaryItems = data.items || [];
+      const badge = document.getElementById('summaryCountBadge');
+      const info = document.getElementById('summaryInfo');
+      badge.textContent = _summaryItems.length;
+      info.textContent = `총 ${_summaryItems.length}건`;
+
+      const tbody = document.getElementById('summaryBody');
+      if (!_summaryItems.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-msg">해당 날짜에 수집된 데이터가 없습니다.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = _summaryItems.map((it, i) => `
+        <tr>
+          <td>${esc(it.organization)}</td>
+          <td>${esc(it.type)}</td>
+          <td><a href="/article?id=${it.id}">${esc(it.title)}</a></td>
+          <td style="text-align:center;">
+            ${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">원문↗</a>` : '-'}
+          </td>
+          <td style="text-align:center;">
+            <button class="btn btn-outline btn-sm" onclick="sendArticleEmail(${it.id})">✉</button>
+          </td>
+        </tr>`).join('');
+    }
+
+    async function loadRecipients() {
+      const data = await api('GET', '/api/recipients');
+      _recipients = data.recipients || [];
+      const list = document.getElementById('recipientList');
+      if (!_recipients.length) {
+        list.innerHTML = '<li class="empty-msg" style="list-style:none;">수신자가 없습니다.</li>';
+        return;
+      }
+      list.innerHTML = _recipients.map(r => `
+        <li class="recip-item" data-id="${r.id}">
+          <label style="display:flex;align-items:center;flex:1;cursor:pointer;">
+            <input type="checkbox" class="recip-check recip-sel" value="${r.id}" checked />
+            <span class="recip-info">
+              <span class="recip-email">${esc(r.email)}</span>
+              ${r.name ? `<br><span class="recip-name">${esc(r.name)}</span>` : ''}
+            </span>
+          </label>
+          <button class="btn btn-danger btn-sm" onclick="deleteRecipient(${r.id})" style="margin-left:8px;">삭제</button>
+        </li>`).join('');
+    }
+
+    function getSelectedRecipientIds() {
+      return [...document.querySelectorAll('.recip-sel:checked')].map(el => Number(el.value));
+    }
+
+    function toggleAllRecipients() {
+      _allSelected = !_allSelected;
+      document.querySelectorAll('.recip-sel').forEach(el => el.checked = _allSelected);
+    }
+
+    async function addRecipient() {
+      const email = document.getElementById('newEmail').value.trim();
+      const name = document.getElementById('newName').value.trim();
+      if (!email) { showToast('이메일을 입력하세요.', true); return; }
+      const data = await api('POST', '/api/recipients', { email, name });
+      if (data.ok) {
+        document.getElementById('newEmail').value = '';
+        document.getElementById('newName').value = '';
+        showToast(`${email} 추가 완료`);
+        loadRecipients();
+      } else {
+        showToast(data.error || '추가 실패', true);
+      }
+    }
+
+    async function deleteRecipient(id) {
+      if (!confirm('삭제하시겠습니까?')) return;
+      const data = await api('POST', '/api/recipients/delete', { id });
+      if (data.ok) { showToast('삭제 완료'); loadRecipients(); }
+      else showToast(data.error || '삭제 실패', true);
+    }
+
+    async function sendSummaryEmail() {
+      const recipIds = getSelectedRecipientIds();
+      if (!recipIds.length) { showToast('수신자를 선택하세요.', true); return; }
+      const date = document.getElementById('summaryDate').value;
+      const btn = document.getElementById('sendSummaryBtn');
+      btn.innerHTML = '<span class="sp"></span> 발송 중…';
+      btn.disabled = true;
+      try {
+        const data = await api('POST', '/api/send-email', { mode: 'summary', date, recipient_ids: recipIds });
+        if (data.ok) showToast(`✅ ${data.sent}명에게 발송 완료`);
+        else showToast(data.error || '발송 실패', true);
+      } finally {
+        btn.innerHTML = '📧 요약표 이메일 발송';
+        btn.disabled = false;
+      }
+    }
+
+    async function sendArticleEmail(articleId) {
+      const recipIds = getSelectedRecipientIds();
+      if (!recipIds.length) { showToast('수신자를 먼저 선택하세요.', true); return; }
+      const data = await api('POST', '/api/send-email', { mode: 'article', article_id: articleId, recipient_ids: recipIds });
+      if (data.ok) showToast(`✅ ${data.sent}명에게 발송 완료`);
+      else showToast(data.error || '발송 실패', true);
+    }
+
+    function esc(s) {
+      return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // Init
+    loadSummary();
+    loadRecipients();
+  </script>
+</body>
+</html>

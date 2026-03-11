@@ -3,9 +3,12 @@ import difflib
 import json
 import math
 import re
+import smtplib
 import sqlite3
 import time
 from collections import Counter
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -21,6 +24,12 @@ LOGIN_HTML_PATH = BASE_DIR / "login.html"
 HTML_PATH = BASE_DIR / "dashboard.html"
 ARTICLE_HTML_PATH = BASE_DIR / "article.html"
 CGIN_LOGO_PATH = BASE_DIR / "cgin_logo.png"
+ADMIN_HTML_PATH = BASE_DIR / "admin.html"
+
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 587
+SMTP_USER = "testprocess429@gmail.com"
+SMTP_PASS = "tbphgenptykcbhsl"
 
 
 def to_int(value, default):
@@ -147,6 +156,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._text_response(html, content_type="text/html; charset=utf-8")
             return
 
+        if path == "/admin":
+            if not self._is_authenticated():
+                self._redirect("/login")
+                return
+            if not ADMIN_HTML_PATH.exists():
+                self._text_response("admin.html not found", status=500)
+                return
+            html = ADMIN_HTML_PATH.read_text(encoding="utf-8")
+            self._text_response(html, content_type="text/html; charset=utf-8")
+            return
+
+        if path == "/api/today-summary":
+            if not self._require_auth_api():
+                return
+            self.handle_today_summary(qs)
+            return
+
+        if path == "/api/recipients":
+            if not self._require_auth_api():
+                return
+            self.handle_get_recipients()
+            return
+
         if path == "/cgin_logo.png":
             if not self._is_authenticated():
                 self._redirect("/login")
@@ -247,6 +279,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
 
             self._json_response({"error": "?꾩씠???먮뒗 鍮꾨?踰덊샇媛 ?щ컮瑜댁? ?딆뒿?덈떎."}, status=401)
+            return
+
+        if path == "/api/recipients":
+            if not self._require_auth_api():
+                return
+            self.handle_add_recipient()
+            return
+
+        if path == "/api/recipients/delete":
+            if not self._require_auth_api():
+                return
+            self.handle_delete_recipient()
+            return
+
+        if path == "/api/send-email":
+            if not self._require_auth_api():
+                return
+            self.handle_send_email()
             return
 
         if path == "/api/logout":
@@ -881,6 +931,278 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json_response({"items": []})
         finally:
             conn.close()
+
+    def _ensure_admin_tables(self, conn):
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS email_recipients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL DEFAULT '',
+                email TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','+9 hours'))
+            )
+        """)
+        conn.commit()
+
+    def handle_today_summary(self, qs):
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            date_str = (qs.get("date", [""])[0] or "").strip()
+            if date_str:
+                where = "date(a.published_at) = ?"
+                params = [date_str]
+            else:
+                where = "date(a.published_at) = date('now', '+9 hours')"
+                params = []
+
+            type_case = """
+                CASE
+                    WHEN source_channel IN ('fss_press_explainer','fsc_press_explainer') THEN '보도설명자료'
+                    WHEN source_channel IN ('fsc_admin_guidance_notice','fss_admin_guidance_notice') THEN '행정지도 예고'
+                    WHEN source_channel IN ('fsc_admin_guidance_enforcement','fss_admin_guidance_enforcement') THEN '행정지도 시행'
+                    WHEN source_channel = 'fsc_law_interpretation' THEN '법령해석'
+                    WHEN source_channel = 'fsc_no_action_opinion' THEN '비조치의견서'
+                    WHEN source_channel IN ('fsc_rule_change_notice','ksd_rule_change_notice','krx_rule_change_notice','kofia_rule_change_notice') THEN '규정 제개정 예고'
+                    WHEN source_channel IN ('fsc_regulation_notice','krx_recent_rule_change','kofia_recent_rule_change') THEN '최신 제·개정 정보'
+                    WHEN source_channel IN ('kfb_publicdata_other','fsec_bbs_222') THEN '기타자료'
+                    ELSE '보도자료'
+                END
+            """
+
+            rows = conn.execute(
+                f"""
+                SELECT
+                    a.id,
+                    COALESCE(a.organization, '(기관 없음)') AS organization,
+                    {type_case} AS type_label,
+                    COALESCE(a.title, '(제목 없음)') AS title,
+                    COALESCE(a.detail_url, a.original_url, '') AS url,
+                    a.published_at
+                FROM articles a
+                WHERE {where}
+                ORDER BY organization ASC, type_label ASC, COALESCE(a.published_at,'') DESC
+                LIMIT 200
+                """,
+                params,
+            ).fetchall()
+
+            items = [
+                {
+                    "id": r["id"],
+                    "organization": r["organization"],
+                    "type": r["type_label"],
+                    "title": r["title"],
+                    "url": r["url"],
+                    "published_at": r["published_at"],
+                }
+                for r in rows
+            ]
+            self._json_response({"total": len(items), "items": items})
+        finally:
+            conn.close()
+
+    def handle_get_recipients(self):
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            rows = conn.execute(
+                "SELECT id, name, email, created_at FROM email_recipients ORDER BY created_at DESC"
+            ).fetchall()
+            self._json_response({"recipients": [dict(r) for r in rows]})
+        finally:
+            conn.close()
+
+    def handle_add_recipient(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            self._json_response({"error": "Invalid JSON"}, status=400)
+            return
+        email = (payload.get("email") or "").strip()
+        name = (payload.get("name") or "").strip()
+        if not email or "@" not in email:
+            self._json_response({"error": "유효한 이메일 주소를 입력하세요."}, status=400)
+            return
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            conn.execute(
+                "INSERT OR IGNORE INTO email_recipients (name, email) VALUES (?, ?)",
+                (name, email),
+            )
+            conn.commit()
+            self._json_response({"ok": True})
+        finally:
+            conn.close()
+
+    def handle_delete_recipient(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            self._json_response({"error": "Invalid JSON"}, status=400)
+            return
+        rid = payload.get("id")
+        if not rid:
+            self._json_response({"error": "id required"}, status=400)
+            return
+        conn = self._db()
+        try:
+            conn.execute("DELETE FROM email_recipients WHERE id = ?", (rid,))
+            conn.commit()
+            self._json_response({"ok": True})
+        finally:
+            conn.close()
+
+    def handle_send_email(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            self._json_response({"error": "Invalid JSON"}, status=400)
+            return
+
+        mode = payload.get("mode", "summary")  # "summary" | "article"
+        recipient_ids = payload.get("recipient_ids", [])
+
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            if recipient_ids:
+                placeholders = ",".join("?" * len(recipient_ids))
+                recipients = conn.execute(
+                    f"SELECT name, email FROM email_recipients WHERE id IN ({placeholders})",
+                    recipient_ids,
+                ).fetchall()
+            else:
+                recipients = conn.execute(
+                    "SELECT name, email FROM email_recipients"
+                ).fetchall()
+
+            if not recipients:
+                self._json_response({"error": "수신자가 없습니다."}, status=400)
+                return
+
+            if mode == "article":
+                article_id = payload.get("article_id")
+                if not article_id:
+                    self._json_response({"error": "article_id required"}, status=400)
+                    return
+                row = conn.execute(
+                    """SELECT id, COALESCE(organization,'') AS org,
+                              COALESCE(title,'(제목 없음)') AS title,
+                              COALESCE(detail_url, original_url,'') AS url,
+                              published_at
+                       FROM articles WHERE id = ?""",
+                    (article_id,),
+                ).fetchone()
+                if not row:
+                    self._json_response({"error": "기사를 찾을 수 없습니다."}, status=404)
+                    return
+                subject = f"[보도자료] {row['title']}"
+                html_body = f"""
+<html><body style="font-family:sans-serif;color:#222;max-width:680px;margin:auto;">
+<h2 style="color:#1a56db;">📋 보도자료 공유</h2>
+<table style="width:100%;border-collapse:collapse;margin-bottom:24px;">
+  <tr style="background:#f1f5f9;"><th style="padding:8px 12px;text-align:left;border:1px solid #e2e8f0;">기관</th><td style="padding:8px 12px;border:1px solid #e2e8f0;">{row['org']}</td></tr>
+  <tr><th style="padding:8px 12px;text-align:left;border:1px solid #e2e8f0;">제목</th><td style="padding:8px 12px;border:1px solid #e2e8f0;">{row['title']}</td></tr>
+  <tr style="background:#f1f5f9;"><th style="padding:8px 12px;text-align:left;border:1px solid #e2e8f0;">발행일</th><td style="padding:8px 12px;border:1px solid #e2e8f0;">{row['published_at'] or '-'}</td></tr>
+</table>
+<p><a href="{row['url']}" style="background:#1a56db;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold;">원문 보기 →</a></p>
+<hr style="border:none;border-top:1px solid #e2e8f0;margin-top:32px;">
+<p style="font-size:12px;color:#64748b;">씨지인사이드 보도자료 대시보드</p>
+</body></html>"""
+            else:
+                # summary mode
+                date_str = payload.get("date", "")
+                where = "date(a.published_at) = ?" if date_str else "date(a.published_at) = date('now', '+9 hours')"
+                params2 = [date_str] if date_str else []
+                type_case = """
+                    CASE
+                        WHEN source_channel IN ('fss_press_explainer','fsc_press_explainer') THEN '보도설명자료'
+                        WHEN source_channel IN ('fsc_admin_guidance_notice','fss_admin_guidance_notice') THEN '행정지도 예고'
+                        WHEN source_channel IN ('fsc_admin_guidance_enforcement','fss_admin_guidance_enforcement') THEN '행정지도 시행'
+                        WHEN source_channel = 'fsc_law_interpretation' THEN '법령해석'
+                        WHEN source_channel = 'fsc_no_action_opinion' THEN '비조치의견서'
+                        WHEN source_channel IN ('fsc_rule_change_notice','ksd_rule_change_notice','krx_rule_change_notice','kofia_rule_change_notice') THEN '규정 제개정 예고'
+                        WHEN source_channel IN ('fsc_regulation_notice','krx_recent_rule_change','kofia_recent_rule_change') THEN '최신 제·개정 정보'
+                        WHEN source_channel IN ('kfb_publicdata_other','fsec_bbs_222') THEN '기타자료'
+                        ELSE '보도자료'
+                    END
+                """
+                rows2 = conn.execute(
+                    f"""
+                    SELECT COALESCE(a.organization,'(기관 없음)') AS org,
+                           {type_case} AS type_label,
+                           COALESCE(a.title,'(제목 없음)') AS title,
+                           COALESCE(a.detail_url, a.original_url,'') AS url
+                    FROM articles a
+                    WHERE {where}
+                    ORDER BY org ASC, type_label ASC
+                    LIMIT 200
+                    """,
+                    params2,
+                ).fetchall()
+
+                from datetime import date as _date
+                display_date = date_str or _date.today().strftime("%Y-%m-%d")
+                subject = f"[보도자료 요약] {display_date} 오늘자 금융규제 보도자료"
+
+                rows_html = "".join(
+                    f"""<tr style="{'background:#f8fafc' if i%2==0 else ''}">
+                      <td style="padding:8px 12px;border:1px solid #e2e8f0;">{r['org']}</td>
+                      <td style="padding:8px 12px;border:1px solid #e2e8f0;">{r['type_label']}</td>
+                      <td style="padding:8px 12px;border:1px solid #e2e8f0;">{r['title']}</td>
+                      <td style="padding:8px 12px;border:1px solid #e2e8f0;text-align:center;">
+                        {'<a href="' + r['url'] + '" style="color:#1a56db;">원문↗</a>' if r['url'] else '-'}
+                      </td>
+                    </tr>"""
+                    for i, r in enumerate(rows2)
+                )
+                html_body = f"""
+<html><body style="font-family:sans-serif;color:#222;max-width:900px;margin:auto;">
+<h2 style="color:#1a56db;">📋 오늘자 보도자료 요약 ({display_date})</h2>
+<p style="color:#475569;">총 {len(rows2)}건</p>
+<table style="width:100%;border-collapse:collapse;font-size:13px;">
+  <thead>
+    <tr style="background:#1a56db;color:#fff;">
+      <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">기관</th>
+      <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">유형</th>
+      <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">제목</th>
+      <th style="padding:10px 12px;text-align:center;border:1px solid #1e40af;width:60px;">링크</th>
+    </tr>
+  </thead>
+  <tbody>{rows_html}</tbody>
+</table>
+<hr style="border:none;border-top:1px solid #e2e8f0;margin-top:32px;">
+<p style="font-size:12px;color:#64748b;">씨지인사이드 보도자료 대시보드</p>
+</body></html>"""
+
+        finally:
+            conn.close()
+
+        # Send emails
+        try:
+            sent = 0
+            for r in recipients:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = subject
+                msg["From"] = SMTP_USER
+                msg["To"] = r["email"]
+                msg.attach(MIMEText(html_body, "html", "utf-8"))
+                with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                    server.ehlo()
+                    server.starttls()
+                    server.login(SMTP_USER, SMTP_PASS)
+                    server.sendmail(SMTP_USER, r["email"], msg.as_string())
+                sent += 1
+            self._json_response({"ok": True, "sent": sent})
+        except Exception as e:
+            self._json_response({"error": f"이메일 발송 실패: {e}"}, status=500)
 
 
 def main():
