@@ -1,68 +1,143 @@
 # 통합 보도자료 대시보드
 
-정부 및 주요 금융 기관(기획재정부, 금융위원회, 금융감독원, 한국은행, 한국거래소 등)의 보도자료, 보도설명자료, 행정지도, 규정개정예고 등을 한 곳에서 수집하고 검색할 수 있는 통합 대시보드입니다.
+금융규제 보도자료·규정 변경·행정지도 등을 자동 수집하고, 웹 대시보드에서 검색·열람·이메일 발송할 수 있는 시스템입니다.
 
-![Dashboard Preview](cgin_logo.png)
+---
+
+## 아키텍처
+
+```
+GCP 서버 (34.30.218.173)
+├── unified_press_ingest.py  ← 크론/수동 실행으로 DB 수집
+├── local_dashboard.py       ← HTTP 서버 (포트 80)
+├── press_unified.db         ← SQLite DB
+└── systemd press-dashboard.service
+```
+
+---
 
 ## 주요 기능
-- **통합 검색 (BM25 적용)**: 여러 기관의 데이터를 제목/본문 위주로 빠르고 정확하게 검색합니다.
-- **자동 수집 (배치)**: 공공데이터포털 API 및 웹 스크래핑을 통해 주기적으로 최신 자료를 자동 수집합니다.
-- **신규 알림 모달**: 당일 새롭게 수집된 데이터를 기관별, 유형별로 요약해서 알려줍니다.
-- **플러그인 기반 확장**: 새로운 데이터 출처를 쉽게 추가할 수 있는 구조(`BaseCollector` 및 YAML 설정)를 갖추고 있습니다.
+
+| 기능 | 설명 |
+|------|------|
+| **보도자료 목록** | 기관·유형·날짜 필터, 페이징, 전문 검색 |
+| **검색어 자동완성** | FTS5 기반 실시간 자동완성 |
+| **상세 보기** | 원문 링크, 첨부파일 다운로드 |
+| **알림 모달** | 오늘자 신규 자료 팝업 확인 |
+| **관리자 페이지** | 오늘자 요약표 생성 및 이메일 발송 |
+| **수신자 관리** | 이메일 수신자 추가/삭제 |
 
 ---
 
-## 🚀 시연 및 셋업 가이드 (외부 시연용)
+## 수집 기관 (ingest_config.yaml)
 
-프로그램을 처음 실행하거나, 최신 데이터를 수집하여 시연을 준비하는 과정입니다.
-
-### 1. 사전 준비 (API 키 설정)
-공공데이터포털(data.go.kr)의 "금융위원회_정책브리핑_보도자료" API 키가 필요합니다.
-루트 폴더에 `service_key.txt` 파일을 만들고, 발급받은 **디코딩된(Decoded)** API 키를 한 줄로 입력합니다.
-
-### 2. 초기 환경 설정 및 의존성 설치
-명령 프롬프트(cmd)나 PowerShell에서 아래 스크립트를 실행하여 Python 가상 환경을 만들고 필요한 라이브러리를 설치합니다.
-```bat
-setup_env.bat
-```
-*(Playwright 브라우저 바이너리 등 필요한 모든 것이 자동 설치됩니다.)*
-
-### 3. 데이터 최신화 (수집 배치 실행)
-시연을 위해 최신 데이터를 DB에 적재합니다. 아래 스크립트를 실행하면 `ingest_config.yaml`의 설정에 따라 최근 5일치 데이터를 각 기관에서 수집해옵니다.
-```bat
-run_daily_ingest.bat
-```
-- 수집 진행 상황은 `logs/` 폴더 내에 실시간으로 기록됩니다.
-- 수집할 기관을 토글하거나 최대 페이지 수를 조절하려면 `ingest_config.yaml` 파일을 수정하면 됩니다.
-
-### 4. 대시보드 서버 실행
-데이터 수집이 완료되었거나, 이미 데이터가 있는 상태라면 웹 서버를 실행하여 대시보드에 접속합니다.
-```bat
-run_dashboard.bat
-```
-실행 후 브라우저에서 `http://localhost:8000` 으로 접속합니다.
-- 처음 접속하면 로그인 화면이 나타납니다. 확인 후 메인 대시보드로 진입합니다.
+- 금융위원회 (FSC) — 보도자료, 행정지도, 규정 변경, 법령해석, 비조치의견서
+- 금융감독원 (FSS) — 보도자료, 보도설명자료, 행정지도
+- 한국은행 (BOK) — 보도자료
+- 예탁결제원 (KSD) — 보도자료, 규정 변경
+- 거래소 (KRX) — 최신 규정 변경
+- 금융투자협회 (KOFIA) — 최신 규정 변경
+- 금융연구원 (KFB), 금융감독원 전자공시 (FSEC) — 기타
 
 ---
 
-## ⚙️ 구성 요소 및 설정
+## 디렉토리 구조
 
-### 수집기 설정 (`ingest_config.yaml`)
-데이터 수집 대상 기관 목록과 옵션을 관리합니다. 
-```yaml
-collectors:
-  fss:
-    enabled: true
-    max_pages: 141
-  # ... (원하는 기관만 true로 설정)
+```
+.
+├── local_dashboard.py         # 웹 서버 (HTTP API + 정적 파일)
+├── unified_press_ingest.py    # 데이터 수집 엔진
+├── attachment_pipeline.py     # 첨부파일 다운로드/처리
+├── document_text_extractor.py # 문서 텍스트 추출 (PDF/HWP)
+├── hwp_text_extractor.py      # HWP 전용 추출
+├── llm_report_pipeline.py     # LLM 보고서 생성 파이프라인
+├── report_builder.py          # 보고서 빌더
+├── ingest_config.yaml         # 수집 기관/채널 설정
+├── requirements.txt           # Python 의존성
+├── service_key.txt            # 공공데이터 API 키 (git 제외)
+├── dashboard.html             # 대시보드 UI
+├── admin.html                 # 관리자 페이지 UI
+├── article.html               # 기사 상세 페이지 UI
+├── login.html                 # 로그인 페이지
+├── run_daily_ingest.sh        # 수집 실행 스크립트
+├── run_dashboard.sh           # 대시보드 실행 스크립트
+├── run_attachment_pipeline.sh # 첨부파일 파이프라인 실행
+├── run_full_pipeline.sh       # 전체 파이프라인 실행
+├── run_llm_report_pipeline.sh # LLM 보고서 파이프라인 실행
+├── deploy/                    # 서버 배포 설정
+└── logs/                      # 실행 로그
 ```
 
-### 새로운 데이터 출처 추가 방법
-1. `unified_press_ingest.py`에 `BaseCollector` 인터페이스를 상속받는 클래스를 구현합니다.
-2. 파일 하단의 `COLLECTOR_REGISTRY`에 클래스를 등록합니다.
-3. `ingest_config.yaml`에 해당 출처 설정을 추가합니다.
+---
 
-### 배포 전략
-현재 시스템은 자체 내장된 SQLite와 Python HTTP 서버를 사용하고 있어 배포가 매우 쉽습니다.
-- **개인 사용자 / 단일 머신**: 소스코드 폴더 전체를 배포 후 위 시연 가이드(`setup_env.bat` -> `run_daily_ingest.bat` -> `run_dashboard.bat`)대로 사용.
-- **서버 환경**: Docker 등을 이용하여 패키징 후 기관 내부망 서버에 호스팅 가능.
+## 서버 설정 (GCP 최초 배포)
+
+```bash
+# 1. 저장소 클론
+git clone https://github.com/jaykim429/press-dashboard.git
+cd press-dashboard
+
+# 2. 가상환경 생성 및 의존성 설치
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# 3. API 키 설정
+echo "YOUR_API_KEY" > service_key.txt
+
+# 4. 첫 수집 실행
+chmod +x run_daily_ingest.sh
+./run_daily_ingest.sh
+
+# 5. systemd 서비스 등록 (deploy/ 참고)
+sudo systemctl enable press-dashboard
+sudo systemctl start press-dashboard
+```
+
+---
+
+## 일상 운영
+
+### 대시보드 접속
+```
+http://34.30.218.173
+ID: test123 / PW: test123
+```
+
+### 데이터 수집 (수동)
+```bash
+cd ~/press-dashboard
+nohup ./run_daily_ingest.sh > logs/manual_$(date +%Y%m%d_%H%M).log 2>&1 &
+tail -f logs/manual_*.log
+```
+
+### 서비스 재시작
+```bash
+sudo systemctl restart press-dashboard
+sudo journalctl -u press-dashboard -n 50 --no-pager
+```
+
+### 코드 업데이트 배포
+```bash
+cd ~/press-dashboard
+git pull
+sudo systemctl restart press-dashboard
+```
+
+---
+
+## 관리자 페이지 (`/admin`)
+
+- 대시보드 우측 상단 **[관]** 버튼 클릭
+- **오늘자 요약표**: 날짜별 기관·유형·링크 테이블 자동 생성
+- **이메일 발송**: 요약표 전체 또는 개별 기사를 수신자에게 메일 발송
+- **수신자 관리**: 이메일 주소 추가/삭제
+- 발신 계정: `testprocess429@gmail.com` (App Password 인증)
+
+---
+
+## 개발 환경 (로컬 테스트)
+
+```bash
+# 로컬에서 서버 실행 (DB 파일 필요)
+.venv/bin/python local_dashboard.py --db-path press_unified.db --host 127.0.0.1 --port 8080
+```
