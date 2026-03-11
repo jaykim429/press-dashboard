@@ -48,6 +48,21 @@ PID="$(pgrep -f "local_dashboard.py --db-path $DB_PATH --host $HOST --port $PORT
 
 if [ -n "${PID:-}" ]; then
   echo "[INFO] Dashboard started (PID: $PID) on http://${HOST}:${PORT}"
+  
+  # DB 캐시 웜업 (백그라운드로 무거운 쿼리 실행시켜 SQLite 페이지 캐싱 유도)
+  echo "[INFO] Initiating cache warm-up..."
+  (
+    sleep 2
+    # Stats (가장 무거운 쿼리)
+    curl -s "http://127.0.0.1:${PORT}/api/stats?top_n=8" > /dev/null
+    # Articles 첫 페이지
+    curl -s "http://127.0.0.1:${PORT}/api/articles?page=1&page_size=10" > /dev/null
+    # Filters
+    curl -s "http://127.0.0.1:${PORT}/api/filters" > /dev/null
+    
+    echo "[INFO] Cache warm-up completed." >> "$LOG_FILE"
+  ) &
+  
   exit 0
 fi
 
