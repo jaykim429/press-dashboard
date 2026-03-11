@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
@@ -1288,8 +1288,6 @@
         this.state.page = nextPage;
         await this.loadArticles();
       }
-    }
-
 
       _bindSuggest() {
         const input = this.el.q;
@@ -1329,6 +1327,7 @@
           if (e.key === "Escape") { list.classList.remove("open"); }
         });
       }
+    }
 
     function toggleStat(listId, btnId) {
       const list = document.getElementById(listId);
