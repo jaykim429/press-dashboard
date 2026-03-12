@@ -34,9 +34,9 @@
     .btn-sm { padding: 5px 10px; font-size: 12px; }
 
     /* Layout */
-    .container { max-width: 1100px; margin: 0 auto; padding: 28px 20px; display: flex; gap: 24px; flex-wrap: wrap; }
-    .main { flex: 1 1 680px; display: flex; flex-direction: column; gap: 20px; }
-    .sidebar { flex: 0 0 300px; display: flex; flex-direction: column; gap: 20px; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 28px 20px; display: flex; flex-direction: column; gap: 24px; }
+    .bottom-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    @media (max-width: 768px) { .bottom-row { grid-template-columns: 1fr; } }
     .card { background: #fff; border-radius: var(--radius); border: 1px solid var(--border); padding: 20px; }
     .card-title { font-size: 15px; font-weight: 700; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
     .badge { background: var(--primary); color: #fff; border-radius: 99px; font-size: 11px; font-weight: 700; padding: 2px 8px; }
@@ -98,45 +98,43 @@
   </header>
 
   <div class="container">
-    <div class="main">
-      <div class="card">
-        <div class="card-title">
-          📋 오늘자 보도자료 요약표
-          <span class="badge" id="summaryCountBadge">0</span>
+    <div class="card">
+      <div class="card-title">
+        📋 오늘자 보도자료 요약표
+        <span class="badge" id="summaryCountBadge">0</span>
+      </div>
+      <div class="date-row">
+        <label>날짜</label>
+        <input type="date" id="summaryDate" />
+        <button class="btn btn-outline btn-sm" onclick="loadSummary()">불러오기</button>
+      </div>
+      <div class="action-bar">
+        <span class="total-count" id="summaryInfo">-</span>
+        <div class="send-btn-wrap">
+          <button class="btn btn-primary btn-sm" onclick="sendSummaryEmail()" id="sendSummaryBtn">
+            📧 요약표 이메일 발송
+          </button>
         </div>
-        <div class="date-row">
-          <label>날짜</label>
-          <input type="date" id="summaryDate" />
-          <button class="btn btn-outline btn-sm" onclick="loadSummary()">불러오기</button>
-        </div>
-        <div class="action-bar">
-          <span class="total-count" id="summaryInfo">-</span>
-          <div class="send-btn-wrap">
-            <button class="btn btn-primary btn-sm" onclick="sendSummaryEmail()" id="sendSummaryBtn">
-              📧 요약표 이메일 발송
-            </button>
-          </div>
-        </div>
-        <div class="summary-wrap">
-          <table class="summary-table" id="summaryTable">
-            <thead>
-              <tr>
-                <th>기관</th>
-                <th>유형</th>
-                <th>제목</th>
-                <th style="width:56px;text-align:center;">링크</th>
-                <th style="width:48px;text-align:center;">발송</th>
-              </tr>
-            </thead>
-            <tbody id="summaryBody">
-              <tr><td colspan="5" class="empty-msg">날짜를 선택하고 불러오기를 눌러주세요.</td></tr>
-            </tbody>
-          </table>
-        </div>
+      </div>
+      <div class="summary-wrap">
+        <table class="summary-table" id="summaryTable">
+          <thead>
+            <tr>
+              <th>기관</th>
+              <th>유형</th>
+              <th>제목</th>
+              <th style="width:56px;text-align:center;">링크</th>
+              <th style="width:48px;text-align:center;">발송</th>
+            </tr>
+          </thead>
+          <tbody id="summaryBody">
+            <tr><td colspan="5" class="empty-msg">날짜를 선택하고 불러오기를 눌러주세요.</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
-    <div class="sidebar">
+    <div class="bottom-row">
       <div class="card">
         <div class="card-title">⏰ 자동 발송 설정</div>
         <div style="font-size:13px; color:var(--gray); margin-bottom:12px;">매일 등록된 수신자 모두에게<br/>요약표를 발송할 시간을 정합니다.</div>
