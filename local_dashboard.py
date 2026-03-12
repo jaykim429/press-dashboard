@@ -1217,8 +1217,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     params2,
                 ).fetchall()
 
-                from datetime import date as _date
-                display_date = date_str or _date.today().strftime("%Y-%m-%d")
+                from datetime import datetime, timezone, timedelta
+                kst = timezone(timedelta(hours=9))
+                display_date = date_str or datetime.now(kst).strftime("%Y-%m-%d")
                 subject = f"[보도자료 요약] {display_date} 오늘자 금융규제 보도자료"
 
                 rows_html = "".join(
@@ -1298,15 +1299,21 @@ def main():
     # Start background email scheduler thread
     def run_email_scheduler():
         import time
-        from datetime import datetime, date
+        from datetime import datetime, timezone, timedelta
         import traceback
+        
+        kst = timezone(timedelta(hours=9))
         
         while True:
             try:
                 # Wait until the start of the next minute
-                now = datetime.now()
-                sleep_seconds = 60 - now.second
+                now_kst = datetime.now(kst)
+                sleep_seconds = 60 - now_kst.second
                 time.sleep(sleep_seconds)
+                
+                now_kst = datetime.now(kst)
+                current_time_str = now_kst.strftime("%H:%M")
+                today_str = now_kst.strftime("%Y-%m-%d")
                 
                 # Check schedule directly from DB
                 conn = sqlite3.connect(DashboardHandler.db_path)
@@ -1321,9 +1328,7 @@ def main():
                     if not schedule_time:
                         continue # No schedule set
                         
-                    current_time_str = datetime.now().strftime("%H:%M")
                     if current_time_str == schedule_time:
-                        today_str = date.today().strftime("%Y-%m-%d")
                         sent_row = conn.execute("SELECT key_value FROM settings WHERE key_name = 'last_email_sent_date'").fetchone()
                         last_sent = sent_row["key_value"] if sent_row else ""
                         
