@@ -20,7 +20,8 @@
     body { font-family: 'Pretendard', 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif; background: #f1f5f9; color: var(--black); min-height: 100vh; }
 
     /* Header */
-    .header { background: #fff; border-bottom: 1px solid var(--border); padding: 0 32px; height: 60px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+    .header { background: #fff; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100; }
+    .header-inner { max-width: 1100px; margin: 0 auto; padding: 0 20px; height: 60px; display: flex; align-items: center; justify-content: space-between; }
     .header-logo { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 700; color: var(--primary); text-decoration: none; }
     .header-logo img { height: 32px; }
     .header-right { display: flex; align-items: center; gap: 12px; }
@@ -88,12 +89,14 @@
 </head>
 <body>
   <header class="header">
-    <a class="header-logo" href="/dashboard">
-      <img src="/cgin_logo.png" alt="씨지인사이드" />
-      관리자
-    </a>
-    <div class="header-right">
-      <a href="/dashboard" class="btn btn-outline">← 대시보드</a>
+    <div class="header-inner">
+      <a class="header-logo" href="/dashboard">
+        <img src="/cgin_logo.png" alt="씨지인사이드" />
+        관리자
+      </a>
+      <div class="header-right">
+        <a href="/dashboard" class="btn btn-outline">← 대시보드</a>
+      </div>
     </div>
   </header>
 
