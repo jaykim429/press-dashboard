@@ -247,12 +247,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/type-report":
             if not self._require_auth_api():
                 return
-            self.handle_type_report(qs)
-            return
-
         if path == "/api/notifications":
             if not self._require_auth_api():
                 return
+            self.handle_notifications(qs)
+            return
+
+        if path == "/api/settings":
+            if not self._require_auth_api():
+                return
+            self.handle_get_settings()
+            return
+
+        if qs:
             self.handle_notifications(qs)
             return
 
@@ -261,6 +268,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+
+        if path == "/api/settings":
+            if not self._require_auth_api():
+                return
+            self.handle_post_settings()
+            return
 
         if path == "/api/login":
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -946,7 +959,51 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 created_at TEXT NOT NULL DEFAULT (datetime('now','+9 hours'))
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key_name TEXT PRIMARY KEY,
+                key_value TEXT NOT NULL
+            )
+        """)
         conn.commit()
+
+    def handle_get_settings(self):
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            row = conn.execute("SELECT key_value FROM settings WHERE key_name = 'email_schedule_time'").fetchone()
+            schedule_time = row["key_value"] if row else ""
+            self._json_response({"email_schedule_time": schedule_time})
+        finally:
+            conn.close()
+
+    def handle_post_settings(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            self._json_response({"error": "Invalid JSON"}, status=400)
+            return
+            
+        schedule_time = (payload.get("email_schedule_time") or "").strip()
+        # Basic validation for HH:MM format
+        if schedule_time and not re.match(r"^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$", schedule_time):
+            self._json_response({"error": "올바른 시간 형식이 아닙니다 (HH:MM)."}, status=400)
+            return
+            
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            conn.execute(
+                "INSERT INTO settings (key_name, key_value) VALUES ('email_schedule_time', ?) "
+                "ON CONFLICT(key_name) DO UPDATE SET key_value = ?",
+                (schedule_time, schedule_time)
+            )
+            conn.commit()
+            self._json_response({"ok": True, "email_schedule_time": schedule_time})
+        finally:
+            conn.close()
 
     def handle_today_summary(self, qs):
         conn = self._db()
@@ -1223,6 +1280,150 @@ def main():
 
     DashboardHandler.db_path = str(db_path)
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
+    
+    # Start background email scheduler thread
+    def run_email_scheduler():
+        import time
+        from datetime import datetime, date
+        import traceback
+        
+        while True:
+            try:
+                # Wait until the start of the next minute
+                now = datetime.now()
+                sleep_seconds = 60 - now.second
+                time.sleep(sleep_seconds)
+                
+                # Check schedule directly from DB
+                conn = sqlite3.connect(DashboardHandler.db_path)
+                conn.row_factory = sqlite3.Row
+                try:
+                    # Make sure tables exist first
+                    conn.execute("CREATE TABLE IF NOT EXISTS settings (key_name TEXT PRIMARY KEY, key_value TEXT NOT NULL)")
+                    
+                    row = conn.execute("SELECT key_value FROM settings WHERE key_name = 'email_schedule_time'").fetchone()
+                    schedule_time = row["key_value"] if row else ""
+                    
+                    if not schedule_time:
+                        continue # No schedule set
+                        
+                    current_time_str = datetime.now().strftime("%H:%M")
+                    if current_time_str == schedule_time:
+                        today_str = date.today().strftime("%Y-%m-%d")
+                        sent_row = conn.execute("SELECT key_value FROM settings WHERE key_name = 'last_email_sent_date'").fetchone()
+                        last_sent = sent_row["key_value"] if sent_row else ""
+                        
+                        if last_sent != today_str:
+                            print(f"[Scheduler] Time matched ({schedule_time}). Sending automated summary emails for {today_str}...")
+                            
+                            # Fetch recipients
+                            recipients = conn.execute("SELECT id, name, email FROM email_recipients ORDER BY created_at DESC").fetchall()
+                            if not recipients:
+                                print("[Scheduler] No recipients found. Skipping.")
+                                continue
+                                
+                            # Fetch today's summary
+                            # (Re-using logic similar to handle_send_email / handle_today_summary but raw DB execution)
+                            type_case = """
+                                CASE
+                                    WHEN source_channel IN ('fss_press_explainer','fsc_press_explainer') THEN '보도설명자료'
+                                    WHEN source_channel IN ('fsc_admin_guidance_notice','fss_admin_guidance_notice') THEN '행정지도 예고'
+                                    WHEN source_channel IN ('fsc_admin_guidance_enforcement','fss_admin_guidance_enforcement') THEN '행정지도 시행'
+                                    WHEN source_channel = 'fsc_law_interpretation' THEN '법령해석'
+                                    WHEN source_channel = 'fsc_no_action_opinion' THEN '비조치의견서'
+                                    WHEN source_channel IN ('fsc_rule_change_notice','ksd_rule_change_notice','krx_rule_change_notice','kofia_rule_change_notice') THEN '규정 제개정 예고'
+                                    WHEN source_channel IN ('fsc_regulation_notice','krx_recent_rule_change','kofia_recent_rule_change') THEN '최신 제·개정 정보'
+                                    WHEN source_channel IN ('kfb_publicdata_other','fsec_bbs_222') THEN '기타자료'
+                                    ELSE '보도자료'
+                                END
+                            """
+                            articles = conn.execute(
+                                f"""
+                                SELECT COALESCE(a.organization,'(기관 없음)') AS org,
+                                       {type_case} AS type_label,
+                                       COALESCE(a.title,'(제목 없음)') AS title,
+                                       COALESCE(a.detail_url, a.original_url,'') AS url
+                                FROM articles a
+                                WHERE date(a.published_at) = date('now', '+9 hours')
+                                ORDER BY org ASC, type_label ASC
+                                LIMIT 200
+                                """
+                            ).fetchall()
+                            
+                            subject = f"[보도자료 요약] {today_str} 오늘자 금융규제 보도자료 자동발송"
+                            
+                            rows_html = "".join(
+                                f'''<tr style="{'background:#f8fafc' if i%2==0 else ''}">
+                                  <td style="padding:8px 12px;border:1px solid #e2e8f0;">{r['org']}</td>
+                                  <td style="padding:8px 12px;border:1px solid #e2e8f0;">{r['type_label']}</td>
+                                  <td style="padding:8px 12px;border:1px solid #e2e8f0;">{r['title']}</td>
+                                  <td style="padding:8px 12px;border:1px solid #e2e8f0;text-align:center;">
+                                    {'<a href="' + r['url'] + '" style="color:#1a56db;">원문↗</a>' if r['url'] else '-'}
+                                  </td>
+                                </tr>'''
+                                for i, r in enumerate(articles)
+                            )
+                            html_body = f"""
+                            <html><body style="font-family:sans-serif;color:#222;max-width:900px;margin:auto;">
+                            <h2 style="color:#1a56db;">📋 오늘자 보도자료 요약 자동발송 ({today_str})</h2>
+                            <p style="color:#475569;">총 {len(articles)}건</p>
+                            <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                              <thead>
+                                <tr style="background:#1a56db;color:#fff;">
+                                  <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">기관</th>
+                                  <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">유형</th>
+                                  <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">제목</th>
+                                  <th style="padding:10px 12px;text-align:center;border:1px solid #1e40af;width:60px;">링크</th>
+                                </tr>
+                              </thead>
+                              <tbody>{rows_html if articles else '<tr><td colspan="4" style="text-align:center;padding:20px;">오늘 수집된 보도자료가 없습니다.</td></tr>'}</tbody>
+                            </table>
+                            <hr style="border:none;border-top:1px solid #e2e8f0;margin-top:32px;">
+                            <p style="font-size:12px;color:#64748b;">씨지인사이드 보도자료 대시보드 스케줄러</p>
+                            </body></html>"""
+
+                            # Send emails
+                            sent = 0
+                            for r in recipients:
+                                msg = MIMEMultipart("alternative")
+                                msg["Subject"] = subject
+                                msg["From"] = DashboardHandler.SMTP_USER
+                                msg["To"] = r["email"]
+                                msg.attach(MIMEText(html_body, "html", "utf-8"))
+                                try:
+                                    with smtplib.SMTP(DashboardHandler.SMTP_HOST, DashboardHandler.SMTP_PORT) as smtp_srv:
+                                        smtp_srv.ehlo()
+                                        smtp_srv.starttls()
+                                        smtp_srv.login(DashboardHandler.SMTP_USER, DashboardHandler.SMTP_PASS)
+                                        smtp_srv.sendmail(DashboardHandler.SMTP_USER, r["email"], msg.as_string())
+                                    sent += 1
+                                except Exception as e:
+                                    print(f"[Scheduler] Failed to send to {r['email']}: {e}")
+                                    
+                            print(f"[Scheduler] Successfully sent automated emails to {sent} recipients.")
+                            
+                            # Mark as sent for today
+                            conn.execute(
+                                "INSERT INTO settings (key_name, key_value) VALUES ('last_email_sent_date', ?) "
+                                "ON CONFLICT(key_name) DO UPDATE SET key_value = ?",
+                                (today_str, today_str)
+                            )
+                            conn.commit()
+                except sqlite3.OperationalError as e:
+                    # Ignore table not found errors before the very first request hits admin page
+                    pass
+                finally:
+                    conn.close()
+                    
+            except Exception as outer_e:
+                print(f"[Scheduler Error] {outer_e}")
+                traceback.print_exc()
+                time.sleep(10) # wait a bit before retrying on crash
+                
+    import threading
+    scheduler_thread = threading.Thread(target=run_email_scheduler, daemon=True)
+    scheduler_thread.start()
+
     print(f"Dashboard running: http://{args.host}:{args.port}")
     print(f"DB: {db_path}")
     try:

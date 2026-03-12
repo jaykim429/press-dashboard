@@ -138,6 +138,15 @@
 
     <div class="sidebar">
       <div class="card">
+        <div class="card-title">⏰ 자동 발송 설정</div>
+        <div style="font-size:13px; color:var(--gray); margin-bottom:12px;">매일 등록된 수신자 모두에게<br/>요약표를 발송할 시간을 정합니다.</div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input type="time" id="scheduleTime" style="flex:1; border:1px solid var(--border); border-radius:8px; padding:8px 12px; font-size:13px; font-family:inherit;" />
+          <button class="btn btn-outline btn-sm" onclick="saveSchedule()">저장</button>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-title">📧 수신자 관리</div>
         <div class="recip-form">
           <input type="email" id="newEmail" placeholder="이메일 주소" />
@@ -237,6 +246,27 @@
       _allSelected = !_allSelected;
       document.querySelectorAll('.recip-sel').forEach(el => el.checked = _allSelected);
     }
+    
+    async function loadSchedule() {
+      const data = await api('GET', '/api/settings');
+      if (data.email_schedule_time) {
+        document.getElementById('scheduleTime').value = data.email_schedule_time;
+      }
+    }
+    
+    async function saveSchedule() {
+      const time = document.getElementById('scheduleTime').value;
+      if (!time) {
+        showToast('시간을 선택하세요.', true);
+        return;
+      }
+      const data = await api('POST', '/api/settings', { email_schedule_time: time });
+      if (data.ok) {
+        showToast(`✅ 매일 ${time} 자동 발송 예약 완료`);
+      } else {
+        showToast(data.error || '저장 실패', true);
+      }
+    }
 
     async function addRecipient() {
       const email = document.getElementById('newEmail').value.trim();
@@ -292,6 +322,7 @@
     // Init
     loadSummary();
     loadRecipients();
+    loadSchedule();
   </script>
 </body>
 </html>
