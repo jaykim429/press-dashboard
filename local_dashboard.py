@@ -669,7 +669,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             
             # Collapse excessive newlines for better readability
             if payload.get("content_text"):
-                payload["content_text"] = re.sub(r'\n{3,}', '\n\n', payload["content_text"])
+                payload["content_text"] = re.sub(r'\n(?:\s*\n){2,}', '\n\n', payload["content_text"])
                 
             payload["attachments"] = [dict(a) for a in atts]
             self._json_response(payload)

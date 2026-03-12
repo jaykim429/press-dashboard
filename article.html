@@ -492,19 +492,21 @@
           UrlUtil.normalizeEmbeddedUrls(this.el.content, data);
           // 3개 이상 연속 <br> -> 2개로 압축
           let inner = this.el.content.innerHTML;
-          inner = inner.replace(/(\s*<br\s*\/?>\s*){3,}/gi, "<br><br>");
-          // 2개 연속 <br> -> <br> + 좁은 간격 스페이서
-          inner = inner.replace(/(<br\s*\/?>)\s*(<br\s*\/?>)/gi,
-            '$1<span style="font-size:10px;display:block;line-height:1;"> </span>');
-          // 연속 빈 <p> 2개 이상 -> 1개로
-          inner = inner.replace(/(<p[^>]*>\s*<\/p>\s*){2,}/gi, "<p></p>");
+          
+          // 1. 의미 없는 빈 P 태그를 <br><br>로 변환 (추후 공통 압축을 위함)
+          inner = inner.replace(/<p[^>]*>(?:[\s\u00A0]|&nbsp;|<br\s*\/?>)*<\/p>/gi, "<br><br>");
+          
+          // 2. <br> 태그가 공백이나 &nbsp;를 사이에 두고 3개 이상 연속될 경우 2개로 압축
+          inner = inner.replace(/(?:<br\s*\/?>(?:[\s\u00A0]|&nbsp;)*){3,}/gi, "<br><br>");
+          
           this.el.content.innerHTML = inner;
           return;
         }
         this.el.content.classList.add("plain");
         const rawText = TextUtil.decodeEntities(data.content_text || "(본문 없음)");
-        // 3줄 이상 빈 줄 -> 최대 2줄로 압축
-        this.el.content.textContent = rawText.replace(/\n{3,}/g, "\n\n");
+        
+        // 3줄 이상 연속된 줄바꿈(중간에 공백/캐리지 리턴 \r 포함)을 2줄로 압축
+        this.el.content.textContent = rawText.replace(/\n(?:\s*\n){2,}/g, "\n\n");
       }
 
       renderAttachments(items) {
