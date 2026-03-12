@@ -10,6 +10,7 @@ Restart=always
 RestartSec=5
 User=wjdgns429
 Group=wjdgns429
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 Environment=PYTHONUNBUFFERED=1
 Environment=TZ=Asia/Seoul
 StandardOutput=append:/home/wjdgns429/press-dashboard/logs/dashboard-systemd.log
