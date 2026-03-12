@@ -1426,15 +1426,16 @@ def main():
                                 except Exception as e:
                                     print(f"[Scheduler] Failed to send to {r['email']}: {e}")
                                     
-                            print(f"[Scheduler] Successfully sent automated emails to {sent} recipients.")
+                            print(f"[Scheduler] Sent {sent}/{len(recipients)} emails.")
                             
-                            # Mark as sent for today
-                            conn.execute(
-                                "INSERT INTO settings (key_name, key_value) VALUES ('last_email_sent_date', ?) "
-                                "ON CONFLICT(key_name) DO UPDATE SET key_value = ?",
-                                (today_str, today_str)
-                            )
-                            conn.commit()
+                            # Only mark as sent if at least one email succeeded
+                            if sent > 0:
+                                conn.execute(
+                                    "INSERT INTO settings (key_name, key_value) VALUES ('last_email_sent_date', ?) "
+                                    "ON CONFLICT(key_name) DO UPDATE SET key_value = ?",
+                                    (today_str, today_str)
+                                )
+                                conn.commit()
                 except sqlite3.OperationalError as e:
                     # Ignore table not found errors before the very first request hits admin page
                     pass
