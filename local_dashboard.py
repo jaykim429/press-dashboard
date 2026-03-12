@@ -1174,9 +1174,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
   <tr><th style="padding:8px 12px;text-align:left;border:1px solid #e2e8f0;">제목</th><td style="padding:8px 12px;border:1px solid #e2e8f0;">{row['title']}</td></tr>
   <tr style="background:#f1f5f9;"><th style="padding:8px 12px;text-align:left;border:1px solid #e2e8f0;">발행일</th><td style="padding:8px 12px;border:1px solid #e2e8f0;">{row['published_at'] or '-'}</td></tr>
 </table>
-<p><a href="{row['url']}" style="background:#1a56db;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold;">원문 보기 →</a></p>
-<hr style="border:none;border-top:1px solid #e2e8f0;margin-top:32px;">
-<p style="font-size:12px;color:#64748b;">씨지인사이드 보도자료 대시보드</p>
+<div style="margin: 24px 0; text-align: center;">
+  <a href="{row['url']}" style="display:inline-block;background:#fff;color:#1a56db;padding:10px 20px;border:1px solid #1a56db;border-radius:6px;text-decoration:none;font-weight:bold;margin-right:10px;">원문 보기</a>
+  <a href="http://34.30.218.173/article?id={row['id']}" style="display:inline-block;background:#1a56db;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold;">씨지인사이드에서 보기 →</a>
+</div>
+<hr style="border:none;border-top:1px solid #e2e8f0;margin-top:32px;margin-bottom:16px;">
+<div style="font-size:12px;color:#64748b;line-height:1.6;text-align:center;">
+  <p style="margin:0;font-weight:bold;">Copyright © (주) 씨지인사이드</p>
+  <p style="margin:0;">서울특별시 마포구 백범로 31길 21 서울창업허브 본관 714호</p>
+  <p style="margin:0;">All rights reserved.</p>
+</div>
 </body></html>"""
             else:
                 # summary mode
@@ -1240,8 +1247,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
   </thead>
   <tbody>{rows_html}</tbody>
 </table>
-<hr style="border:none;border-top:1px solid #e2e8f0;margin-top:32px;">
-<p style="font-size:12px;color:#64748b;">씨지인사이드 보도자료 대시보드</p>
+<div style="margin: 24px 0; text-align: center;">
+  <a href="http://34.30.218.173/" style="display:inline-block;background:#1a56db;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:15px;">씨지인사이드 대시보드 바로가기 →</a>
+</div>
+<hr style="border:none;border-top:1px solid #e2e8f0;margin-top:32px;margin-bottom:16px;">
+<div style="font-size:12px;color:#64748b;line-height:1.6;text-align:center;">
+  <p style="margin:0;font-weight:bold;">Copyright © (주) 씨지인사이드</p>
+  <p style="margin:0;">서울특별시 마포구 백범로 31길 21 서울창업허브 본관 714호</p>
+  <p style="margin:0;">All rights reserved.</p>
+</div>
 </body></html>"""
 
         finally:
@@ -1378,8 +1392,15 @@ def main():
                               </thead>
                               <tbody>{rows_html if articles else '<tr><td colspan="4" style="text-align:center;padding:20px;">오늘 수집된 보도자료가 없습니다.</td></tr>'}</tbody>
                             </table>
-                            <hr style="border:none;border-top:1px solid #e2e8f0;margin-top:32px;">
-                            <p style="font-size:12px;color:#64748b;">씨지인사이드 보도자료 대시보드 스케줄러</p>
+                            <div style="margin: 24px 0; text-align: center;">
+                              <a href="http://34.30.218.173/" style="display:inline-block;background:#1a56db;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:15px;">씨지인사이드 대시보드 바로가기 →</a>
+                            </div>
+                            <hr style="border:none;border-top:1px solid #e2e8f0;margin-top:32px;margin-bottom:16px;">
+                            <div style="font-size:12px;color:#64748b;line-height:1.6;text-align:center;">
+                              <p style="margin:0;font-weight:bold;">Copyright © (주) 씨지인사이드</p>
+                              <p style="margin:0;">서울특별시 마포구 백범로 31길 21 서울창업허브 본관 714호</p>
+                              <p style="margin:0;">All rights reserved.</p>
+                            </div>
                             </body></html>"""
 
                             # Send emails
