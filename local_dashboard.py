@@ -1387,15 +1387,15 @@ def main():
                             for r in recipients:
                                 msg = MIMEMultipart("alternative")
                                 msg["Subject"] = subject
-                                msg["From"] = DashboardHandler.SMTP_USER
+                                msg["From"] = SMTP_USER
                                 msg["To"] = r["email"]
                                 msg.attach(MIMEText(html_body, "html", "utf-8"))
                                 try:
-                                    with smtplib.SMTP(DashboardHandler.SMTP_HOST, DashboardHandler.SMTP_PORT) as smtp_srv:
+                                    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp_srv:
                                         smtp_srv.ehlo()
                                         smtp_srv.starttls()
-                                        smtp_srv.login(DashboardHandler.SMTP_USER, DashboardHandler.SMTP_PASS)
-                                        smtp_srv.sendmail(DashboardHandler.SMTP_USER, r["email"], msg.as_string())
+                                        smtp_srv.login(SMTP_USER, SMTP_PASS)
+                                        smtp_srv.sendmail(SMTP_USER, r["email"], msg.as_string())
                                     sent += 1
                                 except Exception as e:
                                     print(f"[Scheduler] Failed to send to {r['email']}: {e}")
