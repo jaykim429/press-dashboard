@@ -1370,6 +1370,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         with self._dict_cache_lock:
             self._stopwords_cache = None
             self._synonym_map_cache = None
+            # 사전 변경 시 분석 결과 캐시도 함께 초기화(주요 버그 수정)
+            self._kw_result_cache.clear()
 
     def _get_stopwords_set(self, conn):
         with self._dict_cache_lock:
@@ -1392,40 +1394,92 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._synonym_map_cache = m
         return m
 
-    def _extract_keywords_from_texts(self, texts, stopwords, synonym_map, min_len=2):
+    # 한국어 명사 heuristic: 직접 번역어미 템플릿 (regex fallback용)
+    _KO_SUFFIX = re.compile(
+        r'(은|는|이|가|을|를|의|로|에서|와|과|도|만|서|에|로서|으로|면|주는|에서는|에게|을로|으로서|으로서|의에서|을도|를도)$'
+    )
+
+    def _tokenize_text(self, text, min_len=2):
+        """단일 텍스트 토크나이스. (word리스트 반환)
+        키위피를 사용하면 NNG/NNP 명사만, 미사용시 regex+heuristic.
+        """
+        kiwi = self.__class__._kiwi
+        if kiwi is not None:
+            try:
+                result = kiwi.analyze(text, top_n=1)
+                return [
+                    tok.form
+                    for tok in result[0][0].tokens
+                    if tok.tag in ("NNG", "NNP", "SL")
+                    and len(tok.form) >= min_len
+                ]
+            except Exception:
+                pass  # fallthrough
+
+        # regex fallback: 2글자 이상 한국어/영문/숫자 연속 + 조사 heuristic 제거
+        raw = re.findall(r'[\uac00-\ud7a3]{2,}|[a-zA-Z]{3,}', text)
+        result = []
+        for tok in raw:
+            # 한국어: 존재하는 조사 어미 제거 후 2글자 이상인 것만
+            tok = self._KO_SUFFIX.sub('', tok)
+            if len(tok) >= min_len:
+                result.append(tok)
+        return result
+
+    def _extract_keywords_from_texts(self, texts, stopwords, synonym_map,
+                                     min_len=2, use_tfidf=False):
         """
         texts: list of str
-        Returns Counter {word: count}
+        use_tfidf: True이면 TF-IDF 가중 Counter 반환 (연속어 자동 다운랜크),
+                   False이면 일반 빈도 Counter 반환.
+        Returns Counter {word: score}
         """
-        counter = Counter()
-        kiwi = self.__class__._kiwi
-        use_kiwi = kiwi is not None
-
+        # 1) 각 문서를 토크나이시어 저장
+        doc_tokens = []
         for text in texts:
             if not text:
+                doc_tokens.append([])
                 continue
-            if use_kiwi:
-                try:
-                    # kiwi.analyze() → list of (Result, score); Result.tokens → list of Token
-                    result = kiwi.analyze(text, top_n=1)
-                    tokens = [
-                        tok.form
-                        for tok in result[0][0].tokens
-                        if tok.tag in ("NNG", "NNP", "SL")  # 일반명사, 고유명사, 외국어
-                        and len(tok.form) >= min_len
-                    ]
-                except Exception:
-                    tokens = re.findall(r"[\uac00-\ud7a3a-zA-Z0-9]{" + str(min_len) + r",}", text)
-            else:
-                tokens = re.findall(r"[\uac00-\ud7a3a-zA-Z0-9]{" + str(min_len) + r",}", text)
-
+            tokens = self._tokenize_text(text, min_len=min_len)
+            # 동의어 적용 후 불용어 제거
+            cleaned = []
             for tok in tokens:
-                word = synonym_map.get(tok, tok)  # 동의어 → 대표어
-                if word in stopwords:
-                    continue
-                counter[word] += 1
+                word = synonym_map.get(tok, tok)
+                if word not in stopwords:
+                    cleaned.append(word)
+            doc_tokens.append(cleaned)
 
-        return counter
+        if not use_tfidf:
+            # 일반 Counter
+            counter = Counter()
+            for tokens in doc_tokens:
+                counter.update(tokens)
+            return counter
+
+        # 2) TF-IDF 모드
+        N = len(doc_tokens)
+        if N == 0:
+            return Counter()
+
+        # DF (단어가 등장하는 문서 수)
+        df = Counter()
+        for tokens in doc_tokens:
+            for w in set(tokens):
+                df[w] += 1
+
+        # TF-IDF 합산 (소모)  score[w] = sum over docs of (raw_tf * idf)
+        scores: dict = {}
+        for tokens in doc_tokens:
+            if not tokens:
+                continue
+            tf_raw = Counter(tokens)
+            for w, cnt in tf_raw.items():
+                # IDF smoothing: log((N+1)/(df[w]+1)) + 1
+                idf = math.log((N + 1) / (df[w] + 1)) + 1
+                scores[w] = scores.get(w, 0.0) + cnt * idf
+
+        # Counter로 변환 (반올림한 정수 관리)
+        return Counter({w: round(s) for w, s in scores.items()})
 
     def _kw_query_articles(self, conn, press_type, organization, from_date, to_date, target, limit=2000):
         """DB에서 텍스트 목록을 가져온다."""
@@ -1486,7 +1540,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             conn.close()
 
         texts = [r["text"] for r in rows]
-        counter = self._extract_keywords_from_texts(texts, stopwords, synonym_map)
+        counter = self._extract_keywords_from_texts(texts, stopwords, synonym_map, use_tfidf=True)
         top = counter.most_common(top_n)
         payload = {
             "total_docs": len(rows),
