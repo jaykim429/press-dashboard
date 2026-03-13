@@ -4,6 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>관리자 페이지 — 보도자료 대시보드</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/wordcloud2.js@1.2.3/src/wordcloud2.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -21,10 +24,9 @@
 
     /* Header */
     .header { background: #fff; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100; }
-    .header-inner { max-width: 1100px; margin: 0 auto; padding: 0 20px; height: 60px; display: flex; align-items: center; justify-content: space-between; }
+    .header-inner { max-width: 1200px; margin: 0 auto; padding: 0 20px; height: 60px; display: flex; align-items: center; justify-content: space-between; }
     .header-logo { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 700; color: var(--primary); text-decoration: none; }
     .header-logo img { height: 32px; }
-    .header-right { display: flex; align-items: center; gap: 12px; }
     .btn { padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; border: none; display: inline-flex; align-items: center; gap: 6px; transition: all .15s; }
     .btn-primary { background: var(--primary); color: #fff; }
     .btn-primary:hover { background: var(--primary-dark); }
@@ -34,9 +36,18 @@
     .btn-danger:hover { background: #b91c1c; }
     .btn-sm { padding: 5px 10px; font-size: 12px; }
 
+    /* Top Nav Tabs */
+    .tab-nav { background: #fff; border-bottom: 2px solid var(--border); position: sticky; top: 60px; z-index: 90; }
+    .tab-nav-inner { max-width: 1200px; margin: 0 auto; padding: 0 20px; display: flex; gap: 0; }
+    .tab-btn { padding: 14px 22px; font-size: 14px; font-weight: 600; color: var(--gray); background: none; border: none; border-bottom: 3px solid transparent; cursor: pointer; transition: all .15s; margin-bottom: -2px; white-space: nowrap; }
+    .tab-btn:hover { color: var(--primary); }
+    .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+
     /* Layout */
-    .container { max-width: 1100px; margin: 0 auto; padding: 28px 20px; display: flex; flex-direction: column; gap: 24px; }
-    .bottom-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 24px 20px; display: flex; flex-direction: column; gap: 20px; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: contents; }
+    .bottom-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
     @media (max-width: 768px) { .bottom-row { grid-template-columns: 1fr; } }
     .card { background: #fff; border-radius: var(--radius); border: 1px solid var(--border); padding: 20px; }
     .card-title { font-size: 15px; font-weight: 700; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
@@ -76,6 +87,47 @@
     .recip-email { font-weight: 600; color: var(--black); }
     .recip-name { font-size: 12px; color: var(--gray); }
 
+    /* ── 키워드 분석 ── */
+    .kw-filter-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 16px; }
+    .kw-filter-bar label { font-size: 12px; font-weight: 600; color: var(--gray); display: flex; flex-direction: column; gap: 4px; }
+    .kw-filter-bar select, .kw-filter-bar input[type=date], .kw-filter-bar input[type=number] {
+      border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; font-size: 13px; font-family: inherit; background: #fff; min-width: 110px;
+    }
+    .kw-filter-bar input[type=number] { max-width: 80px; }
+    .kw-target-group { display: flex; gap: 6px; }
+    .kw-target-group label { flex-direction: row; align-items: center; gap: 4px; font-size: 13px; font-weight: 600; }
+    .kw-viz-tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+    .kw-viz-btn { padding: 8px 18px; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1.5px solid var(--border); background: #fff; color: var(--gray); transition: all .15s; }
+    .kw-viz-btn:hover { border-color: var(--primary); color: var(--primary); }
+    .kw-viz-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .kw-viz-panel { display: none; }
+    .kw-viz-panel.active { display: block; }
+    #kwWordcloudCanvas { width: 100%; min-height: 420px; border-radius: 10px; background: #fff; border: 1px solid var(--border); }
+    #kwNetworkSvg { width: 100%; min-height: 520px; border-radius: 10px; background: #fff; border: 1px solid var(--border); display: block; }
+    .kw-net-controls { display: flex; gap: 14px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; font-size: 13px; color: var(--gray); }
+    .kw-net-controls label { display: flex; align-items: center; gap: 6px; }
+    .kw-net-controls input[type=range] { accent-color: var(--primary); }
+    .kw-trend-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+    .kw-trend-controls label { font-size: 13px; font-weight: 600; color: var(--gray); }
+    .kw-trend-controls select { border: 1px solid var(--border); border-radius: 7px; padding: 5px 10px; font-size: 13px; font-family: inherit; }
+    .kw-info-bar { font-size: 12px; color: var(--gray); margin-bottom: 10px; padding: 6px 12px; background: #f0f7ff; border-radius: 6px; border-left: 3px solid var(--primary); display: flex; align-items: center; gap: 8px; }
+    .loading-overlay { display: flex; align-items: center; justify-content: center; min-height: 300px; }
+
+    /* ── 사전 관리 ── */
+    .dict-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 900px) { .dict-grid { grid-template-columns: 1fr; } }
+    .dict-input-row { display: flex; gap: 8px; margin-bottom: 14px; }
+    .dict-input-row input { flex: 1; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 13px; font-family: inherit; }
+    .dict-input-row input:focus { outline: none; border-color: var(--primary); }
+    .dict-tag-list { display: flex; flex-wrap: wrap; gap: 8px; max-height: 320px; overflow-y: auto; }
+    .dict-tag { display: inline-flex; align-items: center; gap: 6px; background: #eff6ff; color: var(--primary); border: 1px solid #bfdbfe; border-radius: 20px; padding: 4px 12px; font-size: 13px; font-weight: 600; }
+    .dict-tag button { background: none; border: none; cursor: pointer; color: #93c5fd; font-size: 15px; line-height: 1; padding: 0; }
+    .dict-tag button:hover { color: var(--danger); }
+    .syn-group { margin-bottom: 14px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .syn-group-header { background: var(--surface); padding: 8px 14px; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
+    .syn-group-body { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px; }
+    .syn-input-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+
     /* Toast */
     .toast { position: fixed; bottom: 24px; right: 24px; background: #1e293b; color: #fff; padding: 12px 20px; border-radius: 10px; font-size: 14px; display: none; z-index: 9999; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
     .toast.show { display: block; animation: slideIn .2s ease; }
@@ -84,7 +136,9 @@
 
     /* Loading spinner */
     .sp { display: inline-block; width: 16px; height: 16px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
+    .sp-dark { border-color: var(--primary); border-top-color: transparent; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .sp-lg { width: 40px; height: 40px; border-width: 4px; }
   </style>
 </head>
 <body>
@@ -94,71 +148,261 @@
         <img src="/cgin_logo.png" alt="씨지인사이드" />
         관리자
       </a>
-      <div class="header-right">
+      <div>
         <a href="/dashboard" class="btn btn-outline">← 대시보드</a>
       </div>
     </div>
   </header>
 
-  <div class="container">
-    <div class="card">
-      <div class="card-title">
-        📋 오늘자 보도자료 요약표
-        <span class="badge" id="summaryCountBadge">0</span>
-      </div>
-      <div class="date-row">
-        <label>날짜</label>
-        <input type="date" id="summaryDate" />
-        <button class="btn btn-outline btn-sm" onclick="loadSummary()">불러오기</button>
-      </div>
-      <div class="action-bar">
-        <span class="total-count" id="summaryInfo">-</span>
-        <div class="send-btn-wrap">
-          <button class="btn btn-primary btn-sm" onclick="sendSummaryEmail()" id="sendSummaryBtn">
-            📧 요약표 이메일 발송
-          </button>
+  <nav class="tab-nav">
+    <div class="tab-nav-inner">
+      <button class="tab-btn active" onclick="switchTab('mail')">📋 요약표 발송</button>
+      <button class="tab-btn" onclick="switchTab('kw')">🔍 키워드 분석</button>
+      <button class="tab-btn" onclick="switchTab('dict')">📚 사전 관리</button>
+      <button class="tab-btn" onclick="switchTab('recip')">📧 수신자 · 스케줄</button>
+    </div>
+  </nav>
+
+  <!-- ===== 탭: 요약표 발송 ===== -->
+  <div id="tab-mail" class="tab-panel active">
+    <div class="container">
+      <div class="card">
+        <div class="card-title">
+          📋 오늘자 보도자료 요약표
+          <span class="badge" id="summaryCountBadge">0</span>
         </div>
-      </div>
-      <div class="summary-wrap">
-        <table class="summary-table" id="summaryTable">
-          <thead>
-            <tr>
-              <th>기관</th>
-              <th>유형</th>
-              <th>제목</th>
-              <th style="width:56px;text-align:center;">링크</th>
-              <th style="width:48px;text-align:center;">발송</th>
-            </tr>
-          </thead>
-          <tbody id="summaryBody">
-            <tr><td colspan="5" class="empty-msg">날짜를 선택하고 불러오기를 눌러주세요.</td></tr>
-          </tbody>
-        </table>
+        <div class="date-row">
+          <label>날짜</label>
+          <input type="date" id="summaryDate" />
+          <button class="btn btn-outline btn-sm" onclick="loadSummary()">불러오기</button>
+        </div>
+        <div class="action-bar">
+          <span class="total-count" id="summaryInfo">-</span>
+          <div class="send-btn-wrap">
+            <button class="btn btn-primary btn-sm" onclick="sendSummaryEmail()" id="sendSummaryBtn">
+              📧 요약표 이메일 발송
+            </button>
+          </div>
+        </div>
+        <div class="summary-wrap">
+          <table class="summary-table" id="summaryTable">
+            <thead>
+              <tr>
+                <th>기관</th>
+                <th>유형</th>
+                <th>제목</th>
+                <th style="width:56px;text-align:center;">링크</th>
+                <th style="width:48px;text-align:center;">발송</th>
+              </tr>
+            </thead>
+            <tbody id="summaryBody">
+              <tr><td colspan="5" class="empty-msg">날짜를 선택하고 불러오기를 눌러주세요.</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
+  </div>
 
-    <div class="bottom-row">
+  <!-- ===== 탭: 키워드 분석 ===== -->
+  <div id="tab-kw" class="tab-panel">
+    <div class="container">
       <div class="card">
-        <div class="card-title">⏰ 자동 발송 설정</div>
-        <div style="font-size:13px; color:var(--gray); margin-bottom:12px;">매일 등록된 수신자 모두에게<br/>요약표를 발송할 시간을 정합니다.</div>
-        <div style="display:flex; gap:8px; align-items:center;">
-          <input type="time" id="scheduleTime" style="flex:1; border:1px solid var(--border); border-radius:8px; padding:8px 12px; font-size:13px; font-family:inherit;" />
-          <button class="btn btn-outline btn-sm" onclick="saveSchedule()">저장</button>
+        <div class="card-title">🔍 키워드 분석</div>
+
+        <!-- 필터 -->
+        <div class="kw-filter-bar">
+          <label>
+            분석 대상
+            <div class="kw-target-group" style="gap:12px; margin-top:4px;">
+              <label><input type="radio" name="kwTarget" value="title" checked /> 제목</label>
+              <label><input type="radio" name="kwTarget" value="content" /> 본문</label>
+              <label><input type="radio" name="kwTarget" value="both" /> 제목+본문</label>
+            </div>
+          </label>
+          <label>
+            유형
+            <select id="kwPressType">
+              <option value="">전체</option>
+              <option value="press_release">보도자료</option>
+              <option value="press_explainer">보도설명자료</option>
+              <option value="rule_change_notice">규정 제개정 예고</option>
+              <option value="recent_rule_change_info">최신 제·개정 정보</option>
+              <option value="admin_guidance_notice">행정지도 예고</option>
+              <option value="admin_guidance_enforcement">행정지도 시행</option>
+              <option value="law_interpretation">법령해석</option>
+              <option value="no_action_opinion">비조치의견서</option>
+              <option value="other_data">기타자료</option>
+            </select>
+          </label>
+          <label>
+            기관
+            <select id="kwOrg"><option value="">전체</option></select>
+          </label>
+          <label>
+            시작일
+            <input type="date" id="kwFromDate" />
+          </label>
+          <label>
+            종료일
+            <input type="date" id="kwToDate" />
+          </label>
+          <label>
+            상위 N개
+            <input type="number" id="kwTopN" value="50" min="5" max="200" />
+          </label>
+          <button class="btn btn-primary" onclick="runKwAnalysis()" id="kwRunBtn" style="align-self:flex-end;">
+            🔍 분석 실행
+          </button>
+        </div>
+
+        <div id="kwInfoBar" class="kw-info-bar" style="display:none;"></div>
+
+        <!-- 시각화 탭 버튼 -->
+        <div class="kw-viz-tabs">
+          <button class="kw-viz-btn active" onclick="switchViz('freq', this)">📊 키워드 빈도</button>
+          <button class="kw-viz-btn" onclick="switchViz('net', this)">🕸️ 키워드 네트워크</button>
+          <button class="kw-viz-btn" onclick="switchViz('trend', this)">📈 키워드 트렌드</button>
+        </div>
+
+        <!-- 키워드 빈도 순위표 -->
+        <div id="vizFreq" class="kw-viz-panel active">
+          <div id="kwFreqEmpty" style="display:flex; align-items:center; justify-content:center; min-height:280px; color:var(--gray); font-size:14px;">
+            필터를 설정하고 분석을 실행하세요.
+          </div>
+          <div id="kwFreqTable" style="display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <span id="kwFreqSubtitle" style="font-size:12px; color:var(--gray);"></span>
+              <span style="font-size:12px; color:var(--gray);">클릭하면 트렌드에 추가됩니다</span>
+            </div>
+            <div id="kwFreqBars"></div>
+          </div>
+        </div>
+
+        <!-- 키워드 네트워크 -->
+        <div id="vizNet" class="kw-viz-panel">
+          <div class="kw-net-controls">
+            <label>최소 공출현: <input type="range" id="minCooc" min="1" max="20" value="2" style="width:100px;" oninput="document.getElementById('minCoocVal').textContent=this.value" /> <span id="minCoocVal">2</span></label>
+            <label>최대 노드: <input type="range" id="maxNodes" min="10" max="80" value="40" style="width:100px;" oninput="document.getElementById('maxNodesVal').textContent=this.value" /> <span id="maxNodesVal">40</span></label>
+            <button class="btn btn-outline btn-sm" onclick="runNetworkAnalysis()">🔄 네트워크 재생성</button>
+          </div>
+          <svg id="kwNetworkSvg"></svg>
+          <div id="kwNetEmpty" class="loading-overlay" style="display:flex;">
+            <span style="color:var(--gray); font-size:14px;">분석을 실행하면 네트워크가 표시됩니다.</span>
+          </div>
+        </div>
+
+        <!-- 키워드 트렌드 -->
+        <div id="vizTrend" class="kw-viz-panel">
+          <!-- 키워드 선택 영역 -->
+          <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin-bottom:14px;">
+            <div style="font-size:13px; font-weight:700; color:var(--black); margin-bottom:10px;">📌 추적할 키워드 선택</div>
+            <!-- 직접 입력 -->
+            <div style="display:flex; gap:8px; margin-bottom:10px;">
+              <input type="text" id="trendKwInput"
+                placeholder="키워드 직접 입력 후 Enter"
+                style="flex:1; border:1px solid var(--border); border-radius:7px; padding:7px 12px; font-size:13px; font-family:inherit;"
+                onkeydown="if(event.key==='Enter'){addTrendKeyword(this.value); this.value='';}"
+              />
+              <button class="btn btn-outline btn-sm" onclick="addTrendKeyword(document.getElementById('trendKwInput').value); document.getElementById('trendKwInput').value='';">+ 추가</button>
+              <button class="btn btn-outline btn-sm" onclick="clearTrendKeywords()">초기화</button>
+            </div>
+            <!-- 선택된 키워드 태그 -->
+            <div id="trendKwChips" style="display:flex; flex-wrap:wrap; gap:6px; min-height:28px;">
+              <span style="color:var(--gray);font-size:12px; align-self:center;">분석 실행 후 추천 키워드가 표시되거나 직접 입력하세요.</span>
+            </div>
+            <!-- 분석 후 추천 키워드 -->
+            <div id="trendKwSuggest" style="display:none; margin-top:10px;">
+              <div style="font-size:11px; color:var(--gray); margin-bottom:6px;">▼ 추출된 상위 키워드 (클릭하여 추가)</div>
+              <div id="trendKwSuggestList" style="display:flex; flex-wrap:wrap; gap:5px;"></div>
+            </div>
+          </div>
+          <!-- 집계 옵션 -->
+          <div class="kw-trend-controls">
+            <label>집계 단위
+              <select id="kwGranularity">
+                <option value="month">월별</option>
+                <option value="week">주별</option>
+                <option value="day">일별</option>
+              </select>
+            </label>
+            <button class="btn btn-primary btn-sm" onclick="runTrendAnalysis()">📈 트렌드 분석 실행</button>
+            <span id="trendKwCount" style="font-size:12px; color:var(--gray); align-self:center;"></span>
+          </div>
+          <!-- 차트 -->
+          <div style="position:relative; min-height:400px;">
+            <canvas id="kwTrendChart"></canvas>
+            <div id="kwTrendEmpty" class="loading-overlay" style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(248,250,252,0.9);border-radius:10px; display:flex;">
+              <span style="color:var(--gray); font-size:14px;">키워드를 선택하고 트렌드 분석을 실행하세요.</span>
+            </div>
+          </div>
         </div>
       </div>
+    </div>
+  </div>
 
-      <div class="card">
-        <div class="card-title">📧 수신자 관리</div>
-        <div class="recip-form">
-          <input type="email" id="newEmail" placeholder="이메일 주소" />
-          <input type="text" id="newName" placeholder="이름 (선택)" style="max-width:90px;" />
-          <button class="btn btn-primary btn-sm" onclick="addRecipient()">추가</button>
+  <!-- ===== 탭: 사전 관리 ===== -->
+  <div id="tab-dict" class="tab-panel">
+    <div class="container">
+      <div class="dict-grid">
+        <!-- 불용어 사전 -->
+        <div class="card">
+          <div class="card-title">🚫 불용어 사전 <span class="badge" id="stopwordCountBadge">0</span></div>
+          <p style="font-size:12px; color:var(--gray); margin-bottom:12px;">키워드 추출에서 제외할 단어를 등록합니다.</p>
+          <div class="dict-input-row">
+            <input type="text" id="newStopword" placeholder="제외할 단어 입력" onkeydown="if(event.key==='Enter') addStopword()" />
+            <button class="btn btn-primary btn-sm" onclick="addStopword()">추가</button>
+          </div>
+          <div class="dict-tag-list" id="stopwordList">
+            <span style="color:var(--gray); font-size:13px;">등록된 불용어가 없습니다.</span>
+          </div>
         </div>
-        <ul class="recip-list" id="recipientList">
-          <li class="empty-msg">수신자가 없습니다.</li>
-        </ul>
-        <div style="margin-top:12px; display:flex; justify-content:flex-end; gap:8px;">
-          <button class="btn btn-outline btn-sm" onclick="toggleAllRecipients()">전체 선택</button>
+
+        <!-- 동의어 사전 -->
+        <div class="card">
+          <div class="card-title">🔗 동의어 사전 <span class="badge" id="synonymCountBadge">0</span></div>
+          <p style="font-size:12px; color:var(--gray); margin-bottom:12px;">동의어를 대표어로 통합합니다. (예: "이자율" → "금리")</p>
+          <div class="syn-input-pair">
+            <input type="text" id="synCanonical" placeholder="대표어 (예: 금리)" style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:13px;font-family:inherit;" />
+            <input type="text" id="synSynonym" placeholder="동의어 (예: 이자율)" style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:13px;font-family:inherit;" onkeydown="if(event.key==='Enter') addSynonym()" />
+          </div>
+          <div style="margin-bottom:14px;">
+            <button class="btn btn-primary btn-sm" onclick="addSynonym()">동의어 추가</button>
+          </div>
+          <div id="synonymList" style="max-height:320px; overflow-y:auto;">
+            <span style="color:var(--gray); font-size:13px;">등록된 동의어가 없습니다.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 탭: 수신자 · 스케줄 ===== -->
+  <div id="tab-recip" class="tab-panel">
+    <div class="container">
+      <div class="bottom-row">
+        <div class="card">
+          <div class="card-title">⏰ 자동 발송 설정</div>
+          <div style="font-size:13px; color:var(--gray); margin-bottom:12px;">매일 등록된 수신자 모두에게<br/>요약표를 발송할 시간을 정합니다.</div>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <input type="time" id="scheduleTime" style="flex:1; border:1px solid var(--border); border-radius:8px; padding:8px 12px; font-size:13px; font-family:inherit;" />
+            <button class="btn btn-outline btn-sm" onclick="saveSchedule()">저장</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">📧 수신자 관리</div>
+          <div class="recip-form">
+            <input type="email" id="newEmail" placeholder="이메일 주소" />
+            <input type="text" id="newName" placeholder="이름 (선택)" style="max-width:90px;" />
+            <button class="btn btn-primary btn-sm" onclick="addRecipient()">추가</button>
+          </div>
+          <ul class="recip-list" id="recipientList">
+            <li class="empty-msg">수신자가 없습니다.</li>
+          </ul>
+          <div style="margin-top:12px; display:flex; justify-content:flex-end; gap:8px;">
+            <button class="btn btn-outline btn-sm" onclick="toggleAllRecipients()">전체 선택</button>
+          </div>
         </div>
       </div>
     </div>
@@ -166,172 +410,598 @@
 
   <div class="toast" id="toast"></div>
 
-  <script>
-    let _summaryItems = [];
-    let _recipients = [];
-    let _allSelected = false;
-
-    // Set default date to today
-    const todayISO = new Date().toLocaleDateString('sv-SE');
-    document.getElementById('summaryDate').value = todayISO;
-
-    async function api(method, url, body) {
-      const opts = { method, headers: { 'Content-Type': 'application/json' } };
-      if (body) opts.body = JSON.stringify(body);
-      const res = await fetch(url, opts);
-      return res.json();
-    }
-
-    function showToast(msg, isErr = false) {
-      const t = document.getElementById('toast');
-      t.textContent = msg;
-      t.className = 'toast show' + (isErr ? ' err' : '');
-      clearTimeout(t._timer);
-      t._timer = setTimeout(() => t.classList.remove('show'), 3000);
-    }
-
-    async function loadSummary() {
-      const date = document.getElementById('summaryDate').value;
-      const data = await api('GET', `/api/today-summary?date=${date}`);
-      _summaryItems = data.items || [];
-      const badge = document.getElementById('summaryCountBadge');
-      const info = document.getElementById('summaryInfo');
-      badge.textContent = _summaryItems.length;
-      info.textContent = `총 ${_summaryItems.length}건`;
-
-      const tbody = document.getElementById('summaryBody');
-      if (!_summaryItems.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty-msg">해당 날짜에 수집된 데이터가 없습니다.</td></tr>';
-        return;
-      }
-      tbody.innerHTML = _summaryItems.map((it, i) => `
-        <tr>
-          <td>${esc(it.organization)}</td>
-          <td>${esc(it.type)}</td>
-          <td><a href="/article?id=${it.id}">${esc(it.title)}</a></td>
-          <td style="text-align:center;">
-            ${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">원문↗</a>` : '-'}
-          </td>
-          <td style="text-align:center;">
-            <button class="btn btn-outline btn-sm" onclick="sendArticleEmail(${it.id})">✉</button>
-          </td>
-        </tr>`).join('');
-    }
-
-    async function loadRecipients() {
-      const data = await api('GET', '/api/recipients');
-      _recipients = data.recipients || [];
-      const list = document.getElementById('recipientList');
-      if (!_recipients.length) {
-        list.innerHTML = '<li class="empty-msg" style="list-style:none;">수신자가 없습니다.</li>';
-        return;
-      }
-      list.innerHTML = _recipients.map(r => `
-        <li class="recip-item" data-id="${r.id}">
-          <label style="display:flex;align-items:center;flex:1;cursor:pointer;">
-            <input type="checkbox" class="recip-check recip-sel" value="${r.id}" checked />
-            <span class="recip-info">
-              <span class="recip-email">${esc(r.email)}</span>
-              ${r.name ? `<br><span class="recip-name">${esc(r.name)}</span>` : ''}
-            </span>
-          </label>
-          <button class="btn btn-danger btn-sm" onclick="deleteRecipient(${r.id})" style="margin-left:8px;">삭제</button>
-        </li>`).join('');
-    }
-
-    function getSelectedRecipientIds() {
-      return [...document.querySelectorAll('.recip-sel:checked')].map(el => Number(el.value));
-    }
-
-    function toggleAllRecipients() {
-      _allSelected = !_allSelected;
-      document.querySelectorAll('.recip-sel').forEach(el => el.checked = _allSelected);
-    }
-    
-    async function loadSchedule() {
-      const data = await api('GET', '/api/settings');
-      if (data.email_schedule_time) {
-        document.getElementById('scheduleTime').value = data.email_schedule_time;
-      }
-    }
-    
-    async function saveSchedule() {
-      const time = document.getElementById('scheduleTime').value;
-      if (!time) {
-        showToast('시간을 선택하세요.', true);
-        return;
-      }
-      const data = await api('POST', '/api/settings', { email_schedule_time: time });
-      if (data.ok) {
-        showToast(`✅ 매일 ${time} 자동 발송 예약 완료`);
-      } else {
-        showToast(data.error || '저장 실패', true);
-      }
-    }
-
-    async function addRecipient() {
-      const email = document.getElementById('newEmail').value.trim();
-      const name = document.getElementById('newName').value.trim();
-      if (!email) { showToast('이메일을 입력하세요.', true); return; }
-      const data = await api('POST', '/api/recipients', { email, name });
-      if (data.ok) {
-        document.getElementById('newEmail').value = '';
-        document.getElementById('newName').value = '';
-        showToast(`${email} 추가 완료`);
-        loadRecipients();
-      } else {
-        showToast(data.error || '추가 실패', true);
-      }
-    }
-
-    async function deleteRecipient(id) {
-      if (!confirm('삭제하시겠습니까?')) return;
-      const data = await api('POST', '/api/recipients/delete', { id });
-      if (data.ok) { showToast('삭제 완료'); loadRecipients(); }
-      else showToast(data.error || '삭제 실패', true);
-    }
-
-    async function sendSummaryEmail() {
-      const recipIds = getSelectedRecipientIds();
-      if (!recipIds.length) { showToast('수신자를 선택하세요.', true); return; }
-      const date = document.getElementById('summaryDate').value;
-      const btn = document.getElementById('sendSummaryBtn');
-      btn.innerHTML = '<span class="sp"></span> 발송 중…';
-      btn.disabled = true;
-      try {
-        const data = await api('POST', '/api/send-email', { mode: 'summary', date, recipient_ids: recipIds });
-        if (data.ok) showToast(`✅ ${data.sent}명에게 발송 완료`);
-        else showToast(data.error || '발송 실패', true);
-      } finally {
-        btn.innerHTML = '📧 요약표 이메일 발송';
-        btn.disabled = false;
-      }
-    }
-
-    async function sendArticleEmail(articleId) {
-      const recipIds = getSelectedRecipientIds();
-      if (!recipIds.length) { showToast('수신자를 먼저 선택하세요.', true); return; }
-      const data = await api('POST', '/api/send-email', { mode: 'article', article_id: articleId, recipient_ids: recipIds });
-      if (data.ok) showToast(`✅ ${data.sent}명에게 발송 완료`);
-      else showToast(data.error || '발송 실패', true);
-    }
-
-    function esc(s) {
-      return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-    }
-
-    // Init
-    loadSummary();
-    loadRecipients();
-    loadSchedule();
-  </script>
-
-  <footer style="border-top: 1px solid var(--border); padding: 40px 30px; margin-top: 60px; background: var(--surface); text-align: center; color: var(--gray-060); font-size: 13px; line-height: 1.6;">
-    <div style="max-width: 1100px; margin: 0 auto;">
-      <p style="font-weight: 700; color: var(--gray-030); margin-bottom: 4px;">Copyright © (주) 씨지인사이드</p>
+  <footer style="border-top: 1px solid var(--border); padding: 40px 30px; margin-top: 60px; background: var(--surface); text-align: center; color: var(--gray); font-size: 13px; line-height: 1.6;">
+    <div style="max-width: 1200px; margin: 0 auto;">
+      <p style="font-weight: 700; margin-bottom: 4px;">Copyright © (주) 씨지인사이드</p>
       <p>서울특별시 마포구 백범로 31길 21 서울창업허브 본관 714호</p>
       <p style="margin-top: 4px;">All rights reserved.</p>
     </div>
   </footer>
+
+<script>
+// ── 공통 유틸 ─────────────────────────────────────────────────────────────
+let _summaryItems = [];
+let _recipients = [];
+let _allSelected = false;
+
+const todayISO = new Date().toLocaleDateString('sv-SE');
+document.getElementById('summaryDate').value = todayISO;
+document.getElementById('kwFromDate').value = new Date(Date.now() - 90*24*3600*1000).toLocaleDateString('sv-SE');
+document.getElementById('kwToDate').value = todayISO;
+
+async function api(method, url, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  return res.json();
+}
+
+function showToast(msg, isErr = false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── 탭 전환 ──────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    if (b.textContent.includes({ mail: '요약표', kw: '키워드', dict: '사전', recip: '수신자' }[name])) {
+      b.classList.add('active');
+    }
+  });
+  if (name === 'recip') { loadRecipients(); loadSchedule(); }
+  if (name === 'dict') { loadStopwords(); loadSynonyms(); }
+  if (name === 'kw') { loadOrgOptions(); }
+}
+
+// ── 요약표 탭 ─────────────────────────────────────────────────────────────
+async function loadSummary() {
+  const date = document.getElementById('summaryDate').value;
+  const data = await api('GET', `/api/today-summary?date=${date}`);
+  _summaryItems = data.items || [];
+  document.getElementById('summaryCountBadge').textContent = _summaryItems.length;
+  document.getElementById('summaryInfo').textContent = `총 ${_summaryItems.length}건`;
+  const tbody = document.getElementById('summaryBody');
+  if (!_summaryItems.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-msg">해당 날짜에 수집된 데이터가 없습니다.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = _summaryItems.map(it => `
+    <tr>
+      <td>${esc(it.organization)}</td>
+      <td>${esc(it.type)}</td>
+      <td><a href="/article?id=${it.id}">${esc(it.title)}</a></td>
+      <td style="text-align:center;">
+        ${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">원문↗</a>` : '-'}
+      </td>
+      <td style="text-align:center;">
+        <button class="btn btn-outline btn-sm" onclick="sendArticleEmail(${it.id})">✉</button>
+      </td>
+    </tr>`).join('');
+}
+
+async function sendSummaryEmail() {
+  const recipIds = getSelectedRecipientIds();
+  if (!recipIds.length) { showToast('수신자를 선택하세요.', true); return; }
+  const date = document.getElementById('summaryDate').value;
+  const btn = document.getElementById('sendSummaryBtn');
+  btn.innerHTML = '<span class="sp"></span> 발송 중…';
+  btn.disabled = true;
+  try {
+    const data = await api('POST', '/api/send-email', { mode: 'summary', date, recipient_ids: recipIds });
+    if (data.ok) showToast(`✅ ${data.sent}명에게 발송 완료`);
+    else showToast(data.error || '발송 실패', true);
+  } finally {
+    btn.innerHTML = '📧 요약표 이메일 발송';
+    btn.disabled = false;
+  }
+}
+
+async function sendArticleEmail(articleId) {
+  const recipIds = getSelectedRecipientIds();
+  if (!recipIds.length) { showToast('수신자를 먼저 선택하세요.', true); return; }
+  const data = await api('POST', '/api/send-email', { mode: 'article', article_id: articleId, recipient_ids: recipIds });
+  if (data.ok) showToast(`✅ ${data.sent}명에게 발송 완료`);
+  else showToast(data.error || '발송 실패', true);
+}
+
+// ── 수신자 탭 ─────────────────────────────────────────────────────────────
+async function loadRecipients() {
+  const data = await api('GET', '/api/recipients');
+  _recipients = data.recipients || [];
+  const list = document.getElementById('recipientList');
+  if (!_recipients.length) {
+    list.innerHTML = '<li class="empty-msg" style="list-style:none;">수신자가 없습니다.</li>';
+    return;
+  }
+  list.innerHTML = _recipients.map(r => `
+    <li class="recip-item" data-id="${r.id}">
+      <label style="display:flex;align-items:center;flex:1;cursor:pointer;">
+        <input type="checkbox" class="recip-check recip-sel" value="${r.id}" checked />
+        <span class="recip-info">
+          <span class="recip-email">${esc(r.email)}</span>
+          ${r.name ? `<br><span class="recip-name">${esc(r.name)}</span>` : ''}
+        </span>
+      </label>
+      <button class="btn btn-danger btn-sm" onclick="deleteRecipient(${r.id})" style="margin-left:8px;">삭제</button>
+    </li>`).join('');
+}
+
+function getSelectedRecipientIds() {
+  return [...document.querySelectorAll('.recip-sel:checked')].map(el => Number(el.value));
+}
+
+function toggleAllRecipients() {
+  _allSelected = !_allSelected;
+  document.querySelectorAll('.recip-sel').forEach(el => el.checked = _allSelected);
+}
+
+async function loadSchedule() {
+  const data = await api('GET', '/api/settings');
+  if (data.email_schedule_time) document.getElementById('scheduleTime').value = data.email_schedule_time;
+}
+
+async function saveSchedule() {
+  const time = document.getElementById('scheduleTime').value;
+  if (!time) { showToast('시간을 선택하세요.', true); return; }
+  const data = await api('POST', '/api/settings', { email_schedule_time: time });
+  if (data.ok) showToast(`✅ 매일 ${time} 자동 발송 예약 완료`);
+  else showToast(data.error || '저장 실패', true);
+}
+
+async function addRecipient() {
+  const email = document.getElementById('newEmail').value.trim();
+  const name = document.getElementById('newName').value.trim();
+  if (!email) { showToast('이메일을 입력하세요.', true); return; }
+  const data = await api('POST', '/api/recipients', { email, name });
+  if (data.ok) {
+    document.getElementById('newEmail').value = '';
+    document.getElementById('newName').value = '';
+    showToast(`${email} 추가 완료`);
+    loadRecipients();
+  } else showToast(data.error || '추가 실패', true);
+}
+
+async function deleteRecipient(id) {
+  if (!confirm('삭제하시겠습니까?')) return;
+  const data = await api('POST', '/api/recipients/delete', { id });
+  if (data.ok) { showToast('삭제 완료'); loadRecipients(); }
+  else showToast(data.error || '삭제 실패', true);
+}
+
+// ── 키워드 분석 탭 ────────────────────────────────────────────────────────
+let _kwData = null;        // 마지막 extract 결과
+let _trendData = null;     // 마지막 trend 결과
+let _trendChart = null;
+let _currentViz = 'freq';
+let _trendKeywords = new Set();  // 트렌드에 표시할 키워드 세트
+
+async function loadOrgOptions() {
+  const sel = document.getElementById('kwOrg');
+  if (sel.options.length > 1) return;
+  try {
+    const data = await api('GET', '/api/filters');
+    (data.organizations || []).forEach(org => {
+      const opt = document.createElement('option');
+      opt.value = org; opt.textContent = org;
+      sel.appendChild(opt);
+    });
+  } catch(e) {}
+}
+
+function getKwParams() {
+  const target = document.querySelector('input[name=kwTarget]:checked').value;
+  const press_type = document.getElementById('kwPressType').value;
+  const organization = document.getElementById('kwOrg').value;
+  const from_date = document.getElementById('kwFromDate').value;
+  const to_date = document.getElementById('kwToDate').value;
+  const top_n = document.getElementById('kwTopN').value || 50;
+  return { target, press_type, organization, from_date, to_date, top_n };
+}
+
+function buildQS(params) {
+  return Object.entries(params).filter(([,v]) => v).map(([k,v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+}
+
+async function runKwAnalysis() {
+  const btn = document.getElementById('kwRunBtn');
+  btn.innerHTML = '<span class="sp"></span> 분석 중…';
+  btn.disabled = true;
+  try {
+    const params = getKwParams();
+    const qs = buildQS(params);
+    const data = await api('GET', `/api/kw/extract?${qs}`);
+    if (data.error) { showToast(data.error, true); return; }
+    _kwData = data;
+
+    // info bar
+    const bar = document.getElementById('kwInfoBar');
+    bar.style.display = 'flex';
+    bar.innerHTML = `📊 분석 대상 <strong>${data.total_docs}건</strong> | 엔진: <strong>${data.engine}</strong> | 추출 키워드: <strong>${data.keywords.length}개</strong>`;
+
+    if (_currentViz === 'freq') renderFreqTable(data.keywords);
+    if (_currentViz === 'net') await runNetworkAnalysis();
+    // trend 탭은 키워드 추천만 업데이트
+    updateTrendSuggestions(data.keywords);
+  } finally {
+    btn.innerHTML = '🔍 분석 실행';
+    btn.disabled = false;
+  }
+}
+
+// 시각화 탭 전환
+function switchViz(name, btn) {
+  _currentViz = name;
+  document.querySelectorAll('.kw-viz-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.kw-viz-panel').forEach(p => p.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  const panelId = 'viz' + name.charAt(0).toUpperCase() + name.slice(1);
+  const panel = document.getElementById(panelId);
+  if (panel) panel.classList.add('active');
+
+  if (name === 'freq' && _kwData) renderFreqTable(_kwData.keywords);
+  else if (name === 'net' && _kwData) runNetworkAnalysis();
+}
+
+// ── 키워드 빈도 순위표 ────────────────────────────────────────────────────
+function renderFreqTable(keywords) {
+  if (!keywords || !keywords.length) return;
+  const empty = document.getElementById('kwFreqEmpty');
+  const table = document.getElementById('kwFreqTable');
+  const bars = document.getElementById('kwFreqBars');
+  const subtitle = document.getElementById('kwFreqSubtitle');
+  empty.style.display = 'none';
+  table.style.display = 'block';
+  subtitle.textContent = `상위 ${keywords.length}개 키워드`;
+
+  const maxCount = Math.max(...keywords.map(k => k.count));
+  const COLORS = ['#1a56db','#2563eb','#3b82f6','#0ea5e9','#0891b2','#059669','#7c3aed','#dc2626','#ea580c','#d97706',
+                  '#4f46e5','#0891b2','#65a30d','#b45309','#9333ea'];
+
+  bars.innerHTML = keywords.map((k, i) => {
+    const pct = Math.round((k.count / maxCount) * 100);
+    const color = COLORS[i % COLORS.length];
+    const inTrend = _trendKeywords.has(k.word);
+    return `
+      <div onclick="toggleTrendKeywordFromFreq('${esc(k.word)}')"
+           title="${inTrend ? '트렌드에서 제거' : '트렌드에 추가'}"
+           style="display:flex; align-items:center; gap:10px; padding:5px 8px; border-radius:6px;
+                  cursor:pointer; margin-bottom:4px; transition:background .12s;
+                  background:${inTrend ? '#eff6ff' : 'transparent'};"
+           onmouseover="this.style.background='#f0f7ff'" onmouseout="this.style.background='${inTrend ? '#eff6ff' : 'transparent'}'">
+        <span style="width:34px; text-align:right; font-size:12px; color:${color}; font-weight:700;">${i+1}</span>
+        <span style="min-width:90px; max-width:120px; font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(k.word)}</span>
+        <div style="flex:1; background:#e2e8f0; border-radius:4px; height:14px; overflow:hidden;">
+          <div style="width:${pct}%; background:${color}; height:100%; border-radius:4px; transition:width .3s;"></div>
+        </div>
+        <span style="width:36px; text-align:right; font-size:12px; color:var(--gray);">${k.count}</span>
+        <span style="font-size:14px; color:${inTrend ? '#1a56db' : '#cbd5e1'};">${inTrend ? '✔' : '+'}</span>
+      </div>`;
+  }).join('');
+}
+
+function toggleTrendKeywordFromFreq(word) {
+  if (_trendKeywords.has(word)) {
+    _trendKeywords.delete(word);
+    showToast(`"${word}" 트렌드에서 제거`);
+  } else {
+    _trendKeywords.add(word);
+    showToast(`"${word}" 트렌드에 추가`);
+  }
+  renderTrendChips();
+  if (_kwData) renderFreqTable(_kwData.keywords);  // 체크 상태 업데이트
+}
+
+// ── 트렌드 키워드 관리 ───────────────────────────────────────────────────
+function addTrendKeyword(word) {
+  word = (word || '').trim();
+  if (!word) return;
+  _trendKeywords.add(word);
+  renderTrendChips();
+  showToast(`"${word}" 추가됨`);
+}
+
+function removeTrendKeyword(word) {
+  _trendKeywords.delete(word);
+  renderTrendChips();
+  if (_kwData) renderFreqTable(_kwData.keywords);
+}
+
+function clearTrendKeywords() {
+  _trendKeywords.clear();
+  renderTrendChips();
+  if (_kwData) renderFreqTable(_kwData.keywords);
+}
+
+function renderTrendChips() {
+  const chips = document.getElementById('trendKwChips');
+  const count = document.getElementById('trendKwCount');
+  if (!_trendKeywords.size) {
+    chips.innerHTML = '<span style="color:var(--gray);font-size:12px; align-self:center;">분석 실행 후 추천 키워드가 표시되거나 직접 입력하세요.</span>';
+    count.textContent = '';
+    return;
+  }
+  chips.innerHTML = [..._trendKeywords].map(w => `
+    <span style="display:inline-flex;align-items:center;gap:5px;background:#dbeafe;color:#1d4ed8;
+                 border:1px solid #bfdbfe;border-radius:20px;padding:4px 12px;font-size:13px;font-weight:600;">
+      ${esc(w)}
+      <button onclick="removeTrendKeyword('${esc(w)}')"
+              style="background:none;border:none;cursor:pointer;color:#93c5fd;font-size:15px;line-height:1;padding:0;"
+              onmouseover="this.style.color='#dc2626'" onmouseout="this.style.color='#93c5fd'">×</button>
+    </span>`).join('');
+  count.textContent = `${_trendKeywords.size}개 선택됨`;
+}
+
+function updateTrendSuggestions(keywords) {
+  const suggest = document.getElementById('trendKwSuggest');
+  const list = document.getElementById('trendKwSuggestList');
+  if (!keywords || !keywords.length) { suggest.style.display = 'none'; return; }
+  suggest.style.display = 'block';
+  const top20 = keywords.slice(0, 20);
+  list.innerHTML = top20.map(k => {
+    const has = _trendKeywords.has(k.word);
+    return `<span onclick="${has ? `removeTrendKeyword` : `addTrendKeyword`}('${esc(k.word)}')"
+                  style="cursor:pointer;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600;
+                         background:${has ? '#dbeafe' : '#f1f5f9'};color:${has ? '#1d4ed8' : '#64748b'};
+                         border:1px solid ${has ? '#bfdbfe' : '#e2e8f0'};">
+              ${esc(k.word)} <small>(${k.count})</small>
+            </span>`;
+  }).join('');
+}
+
+// ── 키워드 네트워크 ───────────────────────────────────────────────────────
+async function runNetworkAnalysis() {
+  const params = getKwParams();
+  params.top_n = document.getElementById('maxNodes').value;
+  params.min_cooc = document.getElementById('minCooc').value;
+  const qs = buildQS(params);
+
+  const empty = document.getElementById('kwNetEmpty');
+  empty.innerHTML = '<span class="sp sp-dark sp-lg"></span>';
+  empty.style.display = 'flex';
+
+  try {
+    const data = await api('GET', `/api/kw/cooccurrence?${qs}`);
+    if (data.error || !data.nodes) { showToast(data.error || '네트워크 데이터 없음', true); return; }
+    renderNetwork(data);
+  } catch(e) { showToast('네트워크 오류: ' + e.message, true); }
+  finally { empty.style.display = 'none'; }
+}
+
+function renderNetwork(data) {
+  const svg = d3.select('#kwNetworkSvg');
+  svg.selectAll('*').remove();
+
+  const el = document.getElementById('kwNetworkSvg');
+  const W = el.clientWidth || 900;
+  const H = 520;
+  svg.attr('viewBox', `0 0 ${W} ${H}`);
+
+  if (!data.nodes.length) {
+    svg.append('text').attr('x', W/2).attr('y', H/2)
+      .attr('text-anchor','middle').attr('fill','#94a3b8').attr('font-size',14)
+      .text('표시할 노드가 없습니다. 필터 조건이나 최소 공출현 값을 조정해보세요.');
+    return;
+  }
+
+  const maxFreq = d3.max(data.nodes, d => d.freq) || 1;
+  const maxWeight = d3.max(data.edges, d => d.weight) || 1;
+
+  const nodeRadius = d => 6 + (d.freq / maxFreq) * 22;
+  const nodeColor = d3.scaleSequential(d3.interpolateBlues).domain([0, maxFreq]);
+
+  const simulation = d3.forceSimulation(data.nodes)
+    .force('link', d3.forceLink(data.edges).id(d => d.id).distance(d => 80 - d.weight * 2).strength(0.6))
+    .force('charge', d3.forceManyBody().strength(-180))
+    .force('center', d3.forceCenter(W/2, H/2))
+    .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 6));
+
+  const g = svg.append('g');
+
+  // 줌
+  svg.call(d3.zoom().scaleExtent([0.3, 4]).on('zoom', e => g.attr('transform', e.transform)));
+
+  const link = g.append('g').selectAll('line').data(data.edges).join('line')
+    .attr('stroke', '#94a3b8')
+    .attr('stroke-width', d => 1 + (d.weight / maxWeight) * 4)
+    .attr('stroke-opacity', 0.5);
+
+  const node = g.append('g').selectAll('g').data(data.nodes).join('g')
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end',   (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+  node.append('circle')
+    .attr('r', nodeRadius)
+    .attr('fill', d => nodeColor(d.freq))
+    .attr('stroke', '#fff')
+    .attr('stroke-width', 2)
+    .attr('opacity', 0.9);
+
+  node.append('text')
+    .attr('text-anchor', 'middle')
+    .attr('dy', '0.35em')
+    .attr('font-size', d => Math.max(10, 8 + (d.freq/maxFreq)*10))
+    .attr('font-family', "'Pretendard','Apple SD Gothic Neo',sans-serif")
+    .attr('fill', d => d.freq > maxFreq * 0.6 ? '#fff' : '#1e293b')
+    .attr('pointer-events', 'none')
+    .text(d => d.word);
+
+  node.append('title').text(d => `${d.word}: ${d.freq}회`);
+
+  simulation.on('tick', () => {
+    link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+        .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    node.attr('transform', d => `translate(${d.x},${d.y})`);
+  });
+}
+
+// ── 키워드 트렌드 ─────────────────────────────────────────────────────────
+async function runTrendAnalysis() {
+  const params = getKwParams();
+  params.granularity = document.getElementById('kwGranularity').value;
+
+  if (_trendKeywords.size > 0) {
+    // 사용자가 선택한 키워드로 분석
+    params.keywords = [..._trendKeywords].join(',');
+    delete params.top_n;  // 커스텀 키워드 모드에서는 top_n 불필요
+  } else {
+    // 키워드 미선택 시 자동 상위 10개
+    params.top_n = 10;
+  }
+
+  const qs = buildQS(params);
+  const empty = document.getElementById('kwTrendEmpty');
+  empty.innerHTML = '<span class="sp sp-dark sp-lg"></span>';
+  empty.style.display = 'flex';
+
+  try {
+    const data = await api('GET', `/api/kw/trend?${qs}`);
+    if (data.error) {
+      empty.innerHTML = `<span style="color:var(--gray);font-size:14px;">${data.error}</span>`;
+      return;
+    }
+    if (!data.periods || !data.periods.length) {
+      empty.innerHTML = '<span style="color:var(--gray);font-size:14px;">해당 조건의 데이터가 없습니다.</span>';
+      return;
+    }
+    _trendData = data;
+    empty.style.display = 'none';
+    renderTrend(data);
+  } catch(e) {
+    showToast('트렌드 오류: ' + e.message, true);
+    empty.innerHTML = `<span style="color:var(--danger);font-size:14px;">오류: ${e.message}</span>`;
+  }
+}
+
+function renderTrend(data) {
+  const PALETTE = [
+    '#1a56db','#dc2626','#16a34a','#d97706','#7c3aed',
+    '#0891b2','#db2777','#059669','#ea580c','#4f46e5',
+    '#0284c7','#65a30d','#b45309','#9333ea','#0f766e',
+  ];
+  const ctx = document.getElementById('kwTrendChart').getContext('2d');
+  if (_trendChart) { _trendChart.destroy(); _trendChart = null; }
+
+  const datasets = data.series.map((s, i) => ({
+    label: s.keyword,
+    data: s.counts,
+    borderColor: PALETTE[i % PALETTE.length],
+    backgroundColor: PALETTE[i % PALETTE.length] + '22',
+    borderWidth: 2,
+    tension: 0.3,
+    pointRadius: 3,
+    fill: false,
+  }));
+
+  _trendChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: data.periods, datasets },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'bottom', labels: { font: { family: "'Pretendard','Apple SD Gothic Neo',sans-serif", size: 12 } } },
+        tooltip: { callbacks: { title: items => `기간: ${items[0].label}` } }
+      },
+      scales: {
+        x: { ticks: { maxTicksLimit: 16, maxRotation: 45 } },
+        y: { beginAtZero: true, ticks: { precision: 0 } }
+      }
+    }
+  });
+}
+
+// ── 사전 관리 탭 ──────────────────────────────────────────────────────────
+async function loadStopwords() {
+  const data = await api('GET', '/api/kw/stopwords');
+  const items = data.items || [];
+  document.getElementById('stopwordCountBadge').textContent = items.length;
+  const wrap = document.getElementById('stopwordList');
+  if (!items.length) {
+    wrap.innerHTML = '<span style="color:var(--gray); font-size:13px;">등록된 불용어가 없습니다.</span>';
+    return;
+  }
+  wrap.innerHTML = items.map(it => `
+    <span class="dict-tag">
+      ${esc(it.word)}
+      <button onclick="deleteStopword(${it.id})" title="삭제">×</button>
+    </span>`).join('');
+}
+
+async function addStopword() {
+  const word = document.getElementById('newStopword').value.trim();
+  if (!word) { showToast('단어를 입력하세요.', true); return; }
+  const data = await api('POST', '/api/kw/stopwords', { word });
+  if (data.ok) {
+    document.getElementById('newStopword').value = '';
+    showToast(`"${word}" 불용어 추가 완료`);
+    loadStopwords();
+  } else showToast(data.error || '추가 실패', true);
+}
+
+async function deleteStopword(id) {
+  const data = await api('POST', '/api/kw/stopwords/delete', { id });
+  if (data.ok) { showToast('삭제 완료'); loadStopwords(); }
+  else showToast(data.error || '삭제 실패', true);
+}
+
+async function loadSynonyms() {
+  const data = await api('GET', '/api/kw/synonyms');
+  const groups = data.groups || [];
+  let total = groups.reduce((s, g) => s + g.synonyms.length, 0);
+  document.getElementById('synonymCountBadge').textContent = total;
+  const wrap = document.getElementById('synonymList');
+  if (!groups.length) {
+    wrap.innerHTML = '<span style="color:var(--gray); font-size:13px;">등록된 동의어가 없습니다.</span>';
+    return;
+  }
+  wrap.innerHTML = groups.map(g => `
+    <div class="syn-group">
+      <div class="syn-group-header">
+        <span style="background:#dbeafe;color:#1d4ed8;border-radius:20px;padding:2px 10px;">대표어</span>
+        <strong>${esc(g.canonical)}</strong>
+      </div>
+      <div class="syn-group-body">
+        ${g.synonyms.map(s => `
+          <span class="dict-tag" style="background:#f0fdf4;color:#15803d;border-color:#bbf7d0;">
+            ${esc(s.synonym)}
+            <button onclick="deleteSynonym(${s.id})" title="삭제">×</button>
+          </span>`).join('')}
+      </div>
+    </div>`).join('');
+}
+
+async function addSynonym() {
+  const canonical = document.getElementById('synCanonical').value.trim();
+  const synonym = document.getElementById('synSynonym').value.trim();
+  if (!canonical || !synonym) { showToast('대표어와 동의어를 모두 입력하세요.', true); return; }
+  const data = await api('POST', '/api/kw/synonyms', { canonical, synonym });
+  if (data.ok) {
+    document.getElementById('synSynonym').value = '';
+    showToast(`"${synonym}" → "${canonical}" 추가 완료`);
+    loadSynonyms();
+  } else showToast(data.error || '추가 실패', true);
+}
+
+async function deleteSynonym(id) {
+  const data = await api('POST', '/api/kw/synonyms/delete', { id });
+  if (data.ok) { showToast('삭제 완료'); loadSynonyms(); }
+  else showToast(data.error || '삭제 실패', true);
+}
+
+// ── 초기화 ───────────────────────────────────────────────────────────────
+loadSummary();
+</script>
 </body>
 </html>

@@ -7,7 +7,9 @@ import smtplib
 import socketserver
 import sqlite3
 import time
-from collections import Counter
+from collections import Counter, defaultdict
+from datetime import datetime, timezone, timedelta
+import threading
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -259,6 +261,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.handle_get_settings()
             return
 
+        # ── 키워드 분석 API ────────────────────────────
+        if path == "/api/kw/extract":
+            if not self._require_auth_api():
+                return
+            self.handle_kw_extract(qs)
+            return
+
+        if path == "/api/kw/cooccurrence":
+            if not self._require_auth_api():
+                return
+            self.handle_kw_cooccurrence(qs)
+            return
+
+        if path == "/api/kw/trend":
+            if not self._require_auth_api():
+                return
+            self.handle_kw_trend(qs)
+            return
+
+        if path == "/api/kw/stopwords":
+            if not self._require_auth_api():
+                return
+            self.handle_kw_stopwords_get()
+            return
+
+        if path == "/api/kw/synonyms":
+            if not self._require_auth_api():
+                return
+            self.handle_kw_synonyms_get()
+            return
+        # ──────────────────────────────────────────────
+
         if qs:
             self.handle_notifications(qs)
             return
@@ -316,6 +350,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.handle_send_email()
             return
+
+        # ── 키워드 사전 POST API ───────────────────────
+        if path == "/api/kw/stopwords":
+            if not self._require_auth_api():
+                return
+            self.handle_kw_stopwords_post()
+            return
+
+        if path == "/api/kw/stopwords/delete":
+            if not self._require_auth_api():
+                return
+            self.handle_kw_stopwords_delete()
+            return
+
+        if path == "/api/kw/synonyms":
+            if not self._require_auth_api():
+                return
+            self.handle_kw_synonyms_post()
+            return
+
+        if path == "/api/kw/synonyms/delete":
+            if not self._require_auth_api():
+                return
+            self.handle_kw_synonyms_delete()
+            return
+        # ──────────────────────────────────────────────
 
         if path == "/api/logout":
             data = json.dumps({"ok": True}, ensure_ascii=False).encode("utf-8")
@@ -965,6 +1025,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 key_value TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS kw_stopwords (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                word TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','+9 hours'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS kw_synonyms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical TEXT NOT NULL,
+                synonym TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','+9 hours'))
+            )
+        """)
         conn.commit()
 
     def handle_get_settings(self):
@@ -1280,6 +1355,427 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json_response({"ok": True, "sent": sent})
         except Exception as e:
             self._json_response({"error": f"이메일 발송 실패: {e}"}, status=500)
+
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 키워드 분석 — 사전 캐시
+    # ──────────────────────────────────────────────────────────────────────────
+    _dict_cache_lock = threading.Lock()
+    _stopwords_cache = None          # set | None
+    _synonym_map_cache = None        # {synonym: canonical} | None
+    _kw_result_cache = {}            # {cache_key: (ts, data)}
+    KW_CACHE_TTL = 300               # 5분
+
+    def _invalidate_dict_cache(self):
+        with self._dict_cache_lock:
+            self._stopwords_cache = None
+            self._synonym_map_cache = None
+
+    def _get_stopwords_set(self, conn):
+        with self._dict_cache_lock:
+            if self._stopwords_cache is not None:
+                return self._stopwords_cache
+        rows = conn.execute("SELECT word FROM kw_stopwords").fetchall()
+        sw = {r["word"] for r in rows}
+        with self._dict_cache_lock:
+            self._stopwords_cache = sw
+        return sw
+
+    def _get_synonym_map(self, conn):
+        """Returns {synonym: canonical} mapping."""
+        with self._dict_cache_lock:
+            if self._synonym_map_cache is not None:
+                return self._synonym_map_cache
+        rows = conn.execute("SELECT canonical, synonym FROM kw_synonyms").fetchall()
+        m = {r["synonym"]: r["canonical"] for r in rows}
+        with self._dict_cache_lock:
+            self._synonym_map_cache = m
+        return m
+
+    def _extract_keywords_from_texts(self, texts, stopwords, synonym_map, min_len=2):
+        """
+        texts: list of str
+        Returns Counter {word: count}
+        """
+        counter = Counter()
+        kiwi = self.__class__._kiwi
+        use_kiwi = kiwi is not None
+
+        for text in texts:
+            if not text:
+                continue
+            if use_kiwi:
+                try:
+                    # kiwi.analyze() → list of (Result, score); Result.tokens → list of Token
+                    result = kiwi.analyze(text, top_n=1)
+                    tokens = [
+                        tok.form
+                        for tok in result[0][0].tokens
+                        if tok.tag in ("NNG", "NNP", "SL")  # 일반명사, 고유명사, 외국어
+                        and len(tok.form) >= min_len
+                    ]
+                except Exception:
+                    tokens = re.findall(r"[\uac00-\ud7a3a-zA-Z0-9]{" + str(min_len) + r",}", text)
+            else:
+                tokens = re.findall(r"[\uac00-\ud7a3a-zA-Z0-9]{" + str(min_len) + r",}", text)
+
+            for tok in tokens:
+                word = synonym_map.get(tok, tok)  # 동의어 → 대표어
+                if word in stopwords:
+                    continue
+                counter[word] += 1
+
+        return counter
+
+    def _kw_query_articles(self, conn, press_type, organization, from_date, to_date, target, limit=2000):
+        """DB에서 텍스트 목록을 가져온다."""
+        channels = self.PRESS_TYPE_CHANNELS.get(press_type, [])
+        where = []
+        params = []
+        if channels:
+            placeholders = ",".join("?" * len(channels))
+            where.append(f"source_channel IN ({placeholders})")
+            params.extend(channels)
+        if organization:
+            where.append("organization = ?")
+            params.append(organization)
+        if from_date:
+            where.append("date(substr(published_at,1,10)) >= date(?)")
+            params.append(from_date)
+        if to_date:
+            where.append("date(substr(published_at,1,10)) <= date(?)")
+            params.append(to_date)
+
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        if target == "title":
+            col = "COALESCE(title,'')"
+        elif target == "content":
+            col = "COALESCE(content_text,'')"
+        else:  # both
+            col = "COALESCE(title,'') || ' ' || COALESCE(content_text,'')"
+
+        rows = conn.execute(
+            f"SELECT id, published_at, {col} AS text FROM articles {where_sql} ORDER BY published_at DESC LIMIT ?",
+            params + [limit],
+        ).fetchall()
+        return rows
+
+    def handle_kw_extract(self, qs):
+        press_type = (qs.get("press_type", [""])[0] or "").strip()
+        organization = (qs.get("organization", [""])[0] or "").strip()
+        from_date = (qs.get("from_date", [""])[0] or "").strip()
+        to_date = (qs.get("to_date", [""])[0] or "").strip()
+        target = (qs.get("target", ["title"])[0] or "title").strip()
+        top_n = min(200, max(5, to_int(qs.get("top_n", ["50"])[0], 50)))
+
+        cache_key = f"extract_{press_type}_{organization}_{from_date}_{to_date}_{target}_{top_n}"
+        now = time.time()
+        cached = self._kw_result_cache.get(cache_key)
+        if cached and now - cached[0] < self.KW_CACHE_TTL:
+            self._json_response(cached[1])
+            return
+
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            stopwords = self._get_stopwords_set(conn)
+            synonym_map = self._get_synonym_map(conn)
+            rows = self._kw_query_articles(conn, press_type, organization, from_date, to_date, target)
+        finally:
+            conn.close()
+
+        texts = [r["text"] for r in rows]
+        counter = self._extract_keywords_from_texts(texts, stopwords, synonym_map)
+        top = counter.most_common(top_n)
+        payload = {
+            "total_docs": len(rows),
+            "target": target,
+            "engine": "kiwi" if self.__class__._kiwi is not None else "regex",
+            "keywords": [{"word": w, "count": c} for w, c in top],
+        }
+        self._kw_result_cache[cache_key] = (now, payload)
+        self._json_response(payload)
+
+    def handle_kw_cooccurrence(self, qs):
+        press_type = (qs.get("press_type", [""])[0] or "").strip()
+        organization = (qs.get("organization", [""])[0] or "").strip()
+        from_date = (qs.get("from_date", [""])[0] or "").strip()
+        to_date = (qs.get("to_date", [""])[0] or "").strip()
+        target = (qs.get("target", ["title"])[0] or "title").strip()
+        top_n = min(100, max(5, to_int(qs.get("top_n", ["40"])[0], 40)))
+        min_cooc = max(1, to_int(qs.get("min_cooc", ["2"])[0], 2))
+
+        cache_key = f"cooc_{press_type}_{organization}_{from_date}_{to_date}_{target}_{top_n}_{min_cooc}"
+        now = time.time()
+        cached = self._kw_result_cache.get(cache_key)
+        if cached and now - cached[0] < self.KW_CACHE_TTL:
+            self._json_response(cached[1])
+            return
+
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            stopwords = self._get_stopwords_set(conn)
+            synonym_map = self._get_synonym_map(conn)
+            rows = self._kw_query_articles(conn, press_type, organization, from_date, to_date, target, limit=1000)
+        finally:
+            conn.close()
+
+        kiwi = self.__class__._kiwi
+        # 문서별 키워드 집합 수집
+        doc_keywords = []
+        for row in rows:
+            text = row["text"] or ""
+            if kiwi:
+                try:
+                    result = kiwi.analyze(text, top_n=1)
+                    tokens = [
+                        synonym_map.get(tok.form, tok.form)
+                        for sent in result[0][0].tokens
+                        for tok in [sent]
+                        if tok.tag in ("NNG", "NNP", "SL") and len(tok.form) >= 2
+                    ]
+                except Exception:
+                    tokens = [
+                        synonym_map.get(t, t)
+                        for t in re.findall(r"[\uac00-\ud7a3a-zA-Z0-9]{2,}", text)
+                    ]
+            else:
+                tokens = [
+                    synonym_map.get(t, t)
+                    for t in re.findall(r"[\uac00-\ud7a3a-zA-Z0-9]{2,}", text)
+                ]
+            kw_set = {t for t in tokens if t not in stopwords}
+            doc_keywords.append(kw_set)
+
+        # 전체 빈도 집계 → 상위 top_n 키워드만 네트워크에 포함
+        freq = Counter(w for kws in doc_keywords for w in kws)
+        top_words = {w for w, _ in freq.most_common(top_n)}
+
+        # 동시출현 간선 계산
+        edge_counter = Counter()
+        for kws in doc_keywords:
+            kws_filtered = [w for w in kws if w in top_words]
+            kws_sorted = sorted(kws_filtered)
+            for i in range(len(kws_sorted)):
+                for j in range(i + 1, len(kws_sorted)):
+                    edge_counter[(kws_sorted[i], kws_sorted[j])] += 1
+
+        nodes = [{"id": w, "word": w, "freq": freq[w]} for w in top_words]
+        edges = [
+            {"source": a, "target": b, "weight": cnt}
+            for (a, b), cnt in edge_counter.items()
+            if cnt >= min_cooc
+        ]
+
+        payload = {"nodes": nodes, "edges": edges, "total_docs": len(rows)}
+        self._kw_result_cache[cache_key] = (now, payload)
+        self._json_response(payload)
+
+    def handle_kw_trend(self, qs):
+        press_type = (qs.get("press_type", [""])[0] or "").strip()
+        organization = (qs.get("organization", [""])[0] or "").strip()
+        from_date = (qs.get("from_date", [""])[0] or "").strip()
+        to_date = (qs.get("to_date", [""])[0] or "").strip()
+        target = (qs.get("target", ["title"])[0] or "title").strip()
+        top_n = min(20, max(3, to_int(qs.get("top_n", ["10"])[0], 10)))
+        granularity = (qs.get("granularity", ["month"])[0] or "month").strip()  # day/week/month
+
+        # 사용자가 직접 지정한 키워드 목록 (쉼표 구분)
+        custom_kw_raw = (qs.get("keywords", [""])[0] or "").strip()
+        custom_keywords = [k.strip() for k in custom_kw_raw.split(",") if k.strip()] if custom_kw_raw else []
+
+        cache_key = f"trend_{press_type}_{organization}_{from_date}_{to_date}_{target}_{top_n}_{granularity}_{custom_kw_raw}"
+        now = time.time()
+        cached = self._kw_result_cache.get(cache_key)
+        if cached and now - cached[0] < self.KW_CACHE_TTL:
+            self._json_response(cached[1])
+            return
+
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            stopwords = self._get_stopwords_set(conn)
+            synonym_map = self._get_synonym_map(conn)
+            rows = self._kw_query_articles(conn, press_type, organization, from_date, to_date, target, limit=3000)
+        finally:
+            conn.close()
+
+        kiwi = self.__class__._kiwi
+
+        def get_period_label(pub_at):
+            if not pub_at:
+                return "미상"
+            d = str(pub_at)[:10]  # YYYY-MM-DD
+            if granularity == "day":
+                return d
+            elif granularity == "week":
+                try:
+                    dt = datetime.strptime(d, "%Y-%m-%d")
+                    # ISO 주 시작일(월요일)
+                    week_start = dt - timedelta(days=dt.weekday())
+                    return week_start.strftime("%Y-%m-%d")
+                except Exception:
+                    return d[:7]
+            else:  # month
+                return d[:7]  # YYYY-MM
+
+        # 기간별 문서 분류
+        period_docs = defaultdict(list)  # {period: [text, ...]}
+        for row in rows:
+            label = get_period_label(row["published_at"])
+            period_docs[label].append(row["text"] or "")
+
+        # 전체 텍스트로 상위 키워드 결정
+        all_texts = [row["text"] or "" for row in rows]
+        global_counter = self._extract_keywords_from_texts(all_texts, stopwords, synonym_map)
+        top_keywords = [w for w, _ in global_counter.most_common(top_n)]
+
+        # 기간별 빈도 계산
+        periods = sorted(period_docs.keys())
+        series = []
+        for kw in top_keywords:
+            counts = []
+            for p in periods:
+                texts = period_docs[p]
+                c = self._extract_keywords_from_texts(texts, stopwords, synonym_map)
+                counts.append(c.get(kw, 0))
+            series.append({"keyword": kw, "counts": counts})
+
+        payload = {
+            "periods": periods,
+            "granularity": granularity,
+            "top_keywords": top_keywords,
+            "series": series,
+            "total_docs": len(rows),
+        }
+        self._kw_result_cache[cache_key] = (now, payload)
+        self._json_response(payload)
+
+    # ── 불용어 사전 CRUD ───────────────────────────────────────────────────────
+    def handle_kw_stopwords_get(self):
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            rows = conn.execute("SELECT id, word, created_at FROM kw_stopwords ORDER BY word ASC").fetchall()
+            self._json_response({"items": [dict(r) for r in rows]})
+        finally:
+            conn.close()
+
+    def handle_kw_stopwords_post(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            self._json_response({"error": "Invalid JSON"}, status=400)
+            return
+        word = (payload.get("word") or "").strip()
+        if not word:
+            self._json_response({"error": "word 필드가 필요합니다."}, status=400)
+            return
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            conn.execute("INSERT OR IGNORE INTO kw_stopwords (word) VALUES (?)", (word,))
+            conn.commit()
+            self._invalidate_dict_cache()
+            self._json_response({"ok": True})
+        finally:
+            conn.close()
+
+    def handle_kw_stopwords_delete(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            self._json_response({"error": "Invalid JSON"}, status=400)
+            return
+        sid = payload.get("id")
+        if not sid:
+            self._json_response({"error": "id 필드가 필요합니다."}, status=400)
+            return
+        conn = self._db()
+        try:
+            conn.execute("DELETE FROM kw_stopwords WHERE id = ?", (sid,))
+            conn.commit()
+            self._invalidate_dict_cache()
+            self._json_response({"ok": True})
+        finally:
+            conn.close()
+
+    # ── 동의어 사전 CRUD ───────────────────────────────────────────────────────
+    def handle_kw_synonyms_get(self):
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            rows = conn.execute(
+                "SELECT id, canonical, synonym, created_at FROM kw_synonyms ORDER BY canonical ASC, synonym ASC"
+            ).fetchall()
+            # 대표어별로 그룹핑
+            groups = defaultdict(list)
+            for r in rows:
+                groups[r["canonical"]].append({"id": r["id"], "synonym": r["synonym"]})
+            result = [
+                {"canonical": canonical, "synonyms": syns}
+                for canonical, syns in sorted(groups.items())
+            ]
+            self._json_response({"groups": result})
+        finally:
+            conn.close()
+
+    def handle_kw_synonyms_post(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            self._json_response({"error": "Invalid JSON"}, status=400)
+            return
+        canonical = (payload.get("canonical") or "").strip()
+        synonym = (payload.get("synonym") or "").strip()
+        if not canonical or not synonym:
+            self._json_response({"error": "canonical과 synonym 필드가 필요합니다."}, status=400)
+            return
+        if canonical == synonym:
+            self._json_response({"error": "대표어와 동의어가 같습니다."}, status=400)
+            return
+        conn = self._db()
+        try:
+            self._ensure_admin_tables(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO kw_synonyms (canonical, synonym) VALUES (?, ?)",
+                (canonical, synonym),
+            )
+            conn.commit()
+            self._invalidate_dict_cache()
+            self._json_response({"ok": True})
+        finally:
+            conn.close()
+
+    def handle_kw_synonyms_delete(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            self._json_response({"error": "Invalid JSON"}, status=400)
+            return
+        sid = payload.get("id")
+        if not sid:
+            self._json_response({"error": "id 필드가 필요합니다."}, status=400)
+            return
+        conn = self._db()
+        try:
+            conn.execute("DELETE FROM kw_synonyms WHERE id = ?", (sid,))
+            conn.commit()
+            self._invalidate_dict_cache()
+            self._json_response({"ok": True})
+        finally:
+            conn.close()
+    # ──────────────────────────────────────────────────────────────────────────
 
 
 def main():
