@@ -1,5 +1,6 @@
 import argparse
 import difflib
+import html
 import json
 import math
 import re
@@ -86,6 +87,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _fetch_attachment_map(self, conn, article_ids):
+        valid_ids = [to_int(article_id, 0) for article_id in article_ids if to_int(article_id, 0) > 0]
+        if not valid_ids:
+            return {}
+        placeholders = ",".join("?" * len(valid_ids))
+        rows = conn.execute(
+            f"""
+            SELECT article_id, COALESCE(file_name, '첨부파일') AS file_name, COALESCE(file_url, '') AS file_url
+            FROM attachments
+            WHERE article_id IN ({placeholders}) AND COALESCE(file_url, '') <> ''
+            ORDER BY article_id ASC, id ASC
+            """,
+            valid_ids,
+        ).fetchall()
+        attachment_map = defaultdict(list)
+        for row in rows:
+            attachment_map[row["article_id"]].append(row)
+        return attachment_map
+
+    def _render_attachment_links_html(self, attachments):
+        if not attachments:
+            return "-"
+        links = " / ".join(
+            (
+                f'<a href="{html.escape(att["file_url"], quote=True)}" '
+                'style="color:#1d4ed8;text-decoration:none;" target="_blank" '
+                f'rel="noopener noreferrer">{html.escape(att["file_name"])}</a>'
+            )
+            for att in attachments
+        )
+        return f'<div style="font-size:12px;line-height:1.6;">{links}</div>'
 
     def _text_response(self, text, status=200, content_type="text/plain; charset=utf-8"):
         data = text.encode("utf-8")
@@ -290,6 +323,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not self._require_auth_api():
                 return
             self.handle_kw_synonyms_get()
+            return
+
+        if path == "/api/kw/articles":
+            if not self._require_auth_api():
+                return
+            self.handle_kw_articles(qs)
             return
         # ──────────────────────────────────────────────
 
@@ -1240,6 +1279,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not row:
                     self._json_response({"error": "기사를 찾을 수 없습니다."}, status=404)
                     return
+                attachments = conn.execute(
+                    """
+                    SELECT COALESCE(file_name, '첨부파일') AS file_name, COALESCE(file_url, '') AS file_url
+                    FROM attachments
+                    WHERE article_id = ? AND COALESCE(file_url, '') <> ''
+                    ORDER BY id ASC
+                    """,
+                    (article_id,),
+                ).fetchall()
+                attachment_html = ""
+                if attachments:
+                    attachment_items = "".join(
+                        (
+                            f'<li style="margin:0 0 8px 18px;">'
+                            f'<a href="{html.escape(a["file_url"], quote=True)}" '
+                            'style="color:#1a56db;text-decoration:none;" target="_blank" '
+                            f'rel="noopener noreferrer">{html.escape(a["file_name"])}</a>'
+                            "</li>"
+                        )
+                        for a in attachments
+                    )
+                    attachment_html = f"""
+<div style="margin:24px 0 0;">
+  <h3 style="font-size:16px;color:#0f172a;margin:0 0 12px;">첨부자료</h3>
+  <ul style="margin:0;padding:0;line-height:1.7;">
+    {attachment_items}
+  </ul>
+</div>"""
                 subject = f"[보도자료] {row['title']}"
                 html_body = f"""
 <html><body style="font-family:sans-serif;color:#222;max-width:680px;margin:auto;">
@@ -1253,6 +1320,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
   <a href="{row['url']}" style="display:inline-block;background:#fff;color:#1a56db;padding:10px 20px;border:1px solid #1a56db;border-radius:6px;text-decoration:none;font-weight:bold;margin-right:10px;">원문 보기</a>
   <a href="http://34.30.218.173/article?id={row['id']}" style="display:inline-block;background:#1a56db;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold;">씨지인사이드에서 보기 →</a>
 </div>
+{attachment_html}
 <hr style="border:none;border-top:1px solid #e2e8f0;margin-top:32px;margin-bottom:16px;">
 <div style="font-size:12px;color:#64748b;line-height:1.6;text-align:center;">
   <p style="margin:0;font-weight:bold;">Copyright © (주) 씨지인사이드</p>
@@ -1280,7 +1348,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 """
                 rows2 = conn.execute(
                     f"""
-                    SELECT COALESCE(a.organization,'(기관 없음)') AS org,
+                    SELECT a.id,
+                           COALESCE(a.organization,'(기관 없음)') AS org,
                            {type_case} AS type_label,
                            COALESCE(a.title,'(제목 없음)') AS title,
                            COALESCE(a.detail_url, a.original_url,'') AS url
@@ -1291,6 +1360,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     """,
                     params2,
                 ).fetchall()
+                attachment_map = self._fetch_attachment_map(conn, [r["id"] for r in rows2])
 
                 from datetime import datetime, timezone, timedelta
                 kst = timezone(timedelta(hours=9))
@@ -1302,6 +1372,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                       <td style="padding:8px 12px;border:1px solid #e2e8f0;">{r['org']}</td>
                       <td style="padding:8px 12px;border:1px solid #e2e8f0;">{r['type_label']}</td>
                       <td style="padding:8px 12px;border:1px solid #e2e8f0;">{r['title']}</td>
+                      <td style="padding:8px 12px;border:1px solid #e2e8f0;">{self._render_attachment_links_html(attachment_map.get(r['id'], []))}</td>
                       <td style="padding:8px 12px;border:1px solid #e2e8f0;text-align:center;">
                         {'<a href="' + r['url'] + '" style="color:#1a56db;">원문↗</a>' if r['url'] else '-'}
                       </td>
@@ -1318,6 +1389,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
       <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">기관</th>
       <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">유형</th>
       <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">제목</th>
+      <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">첨부</th>
       <th style="padding:10px 12px;text-align:center;border:1px solid #1e40af;width:60px;">링크</th>
     </tr>
   </thead>
@@ -1908,7 +1980,8 @@ def main():
                             """
                             articles = conn.execute(
                                 f"""
-                                SELECT COALESCE(a.organization,'(기관 없음)') AS org,
+                                SELECT a.id,
+                                       COALESCE(a.organization,'(기관 없음)') AS org,
                                        {type_case} AS type_label,
                                        COALESCE(a.title,'(제목 없음)') AS title,
                                        COALESCE(a.detail_url, a.original_url,'') AS url
@@ -1918,6 +1991,7 @@ def main():
                                 LIMIT 200
                                 """
                             ).fetchall()
+                            attachment_map = DashboardHandler._fetch_attachment_map(self, conn, [r["id"] for r in articles])
                             
                             subject = f"[보도자료 요약] {today_str} 오늘자 금융규제 보도자료 자동발송"
                             
@@ -1926,6 +2000,7 @@ def main():
                                   <td style="padding:8px 12px;border:1px solid #e2e8f0;">{r['org']}</td>
                                   <td style="padding:8px 12px;border:1px solid #e2e8f0;">{r['type_label']}</td>
                                   <td style="padding:8px 12px;border:1px solid #e2e8f0;">{r['title']}</td>
+                                  <td style="padding:8px 12px;border:1px solid #e2e8f0;">{DashboardHandler._render_attachment_links_html(self, attachment_map.get(r['id'], []))}</td>
                                   <td style="padding:8px 12px;border:1px solid #e2e8f0;text-align:center;">
                                     {'<a href="' + r['url'] + '" style="color:#1a56db;">원문↗</a>' if r['url'] else '-'}
                                   </td>
@@ -1942,10 +2017,11 @@ def main():
                                   <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">기관</th>
                                   <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">유형</th>
                                   <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">제목</th>
+                                  <th style="padding:10px 12px;text-align:left;border:1px solid #1e40af;">첨부</th>
                                   <th style="padding:10px 12px;text-align:center;border:1px solid #1e40af;width:60px;">링크</th>
                                 </tr>
                               </thead>
-                              <tbody>{rows_html if articles else '<tr><td colspan="4" style="text-align:center;padding:20px;">오늘 수집된 보도자료가 없습니다.</td></tr>'}</tbody>
+                              <tbody>{rows_html if articles else '<tr><td colspan="5" style="text-align:center;padding:20px;">오늘 수집된 보도자료가 없습니다.</td></tr>'}</tbody>
                             </table>
                             <div style="margin: 24px 0; text-align: center;">
                               <a href="http://34.30.218.173/" style="display:inline-block;background:#1a56db;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:15px;">씨지인사이드 대시보드 바로가기 →</a>
@@ -2013,5 +2089,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
