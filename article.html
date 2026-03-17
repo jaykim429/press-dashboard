@@ -215,6 +215,53 @@
       font-size: 14px;
     }
 
+    .related-news-block { margin-top: 24px; }
+    .related-news-list { list-style: none; }
+    .related-news-item {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-s);
+      background: #fafbff;
+      padding: 14px;
+      margin-top: 12px;
+    }
+    .related-news-item:first-child { margin-top: 0; }
+    .related-news-link {
+      color: var(--black-010);
+      text-decoration: none;
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.5;
+      display: block;
+    }
+    .related-news-link:hover { color: var(--primary); }
+    .related-news-meta {
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--gray-060);
+    }
+    .related-news-summary {
+      margin-top: 8px;
+      color: #374151;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .related-news-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .related-news-tag {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      background: #e0ecff;
+      color: #1d4ed8;
+      padding: 4px 9px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
     /* Similar */
     .similar-list { list-style: none; }
     .similar-list li { border-bottom: 1px solid var(--border); padding: 12px 0; }
@@ -291,6 +338,11 @@
           <div style="margin-top:24px;">
             <h2 class="section-title">첨부 자료</h2>
             <ul class="att-list" id="attList"></ul>
+          </div>
+
+          <div class="related-news-block" id="relatedNewsWrap">
+            <h2 class="section-title">관련 뉴스</h2>
+            <div class="report-empty">이 자료와 연결된 뉴스를 찾는 중입니다...</div>
           </div>
 
           <div class="report-card" id="llmReportWrap">
@@ -419,6 +471,7 @@
           content: document.getElementById("content"),
           attList: document.getElementById("attList"),
           similarList: document.getElementById("similarList"),
+          relatedNewsWrap: document.getElementById("relatedNewsWrap"),
           llmReportWrap: document.getElementById("llmReportWrap"),
         };
       }
@@ -433,6 +486,7 @@
           if (!res.ok) { this.showError(`상세 조회 실패 (${res.status})`); return; }
           const data = await res.json();
           this.render(data);
+          await this.renderRelatedNews(id);
           await this.renderLinkedReport(id);
           await this.renderSimilar(id);
         } catch (err) {
@@ -521,6 +575,50 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             ${name}</a></li>`;
         }).join("");
+      }
+
+      async renderRelatedNews(articleId) {
+        try {
+          const res = await fetch(`/api/related-news?id=${encodeURIComponent(articleId)}&limit=5`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          const items = data.items || [];
+          if (!items.length) {
+            this.el.relatedNewsWrap.innerHTML = `
+              <h2 class="section-title">관련 뉴스</h2>
+              <div class="report-empty">현재 연결된 관련 뉴스가 없습니다.</div>
+            `;
+            return;
+          }
+          this.el.relatedNewsWrap.innerHTML = `
+            <h2 class="section-title">관련 뉴스</h2>
+            <div class="report-meta">첨부 자료와 본문을 기준으로 관련성 높은 기사만 최대 5건 표시합니다.</div>
+            <ul class="related-news-list">
+              ${items.map((item) => {
+                const title = TextUtil.safe(item.title || "");
+                const org = TextUtil.safe(item.organization || "");
+                const date = TextUtil.safe(DateUtil.onlyDate(item.published_at));
+                const summary = TextUtil.safe(item.summary || "");
+                const tags = (item.reasons || []).map((reason) =>
+                  `<span class="related-news-tag">${TextUtil.safe(reason)}</span>`
+                ).join("");
+                return `
+                  <li class="related-news-item">
+                    <a class="related-news-link" href="/article?id=${item.id}">${title}</a>
+                    <div class="related-news-meta">${org} · ${date}</div>
+                    <div class="related-news-summary">${summary || "요약 정보가 없습니다."}</div>
+                    <div class="related-news-tags">${tags}</div>
+                  </li>
+                `;
+              }).join("")}
+            </ul>
+          `;
+        } catch (_) {
+          this.el.relatedNewsWrap.innerHTML = `
+            <h2 class="section-title">관련 뉴스</h2>
+            <div class="report-empty">관련 뉴스를 불러오지 못했습니다.</div>
+          `;
+        }
       }
 
       async renderLinkedReport(articleId) {

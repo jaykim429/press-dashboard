@@ -1,8 +1,10 @@
 import argparse
 import difflib
 import html
+import hashlib
 import json
 import math
+import os
 import re
 import smtplib
 import socketserver
@@ -16,6 +18,9 @@ from email.mime.text import MIMEText
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+import numpy as np
+import requests
 
 try:
     from kiwipiepy import Kiwi
@@ -38,6 +43,489 @@ SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 SMTP_USER = "testprocess429@gmail.com"
 SMTP_PASS = "tbphgenptykcbhsl"
+
+KST = timezone(timedelta(hours=9))
+NEWS_SOURCE_CHANNEL_HINTS = {
+    "arirang_news_api",
+    "arirang_news_article",
+    "arirang_news",
+    "news_article",
+}
+NEWS_SOURCE_SYSTEM_HINTS = {
+    "arirang_news_api",
+    "arirang_news",
+    "news_api",
+}
+RELATED_NEWS_EMBED_MODEL = os.getenv("RELATED_NEWS_EMBED_MODEL", "zembed-1")
+RELATED_NEWS_EMBED_ENDPOINT = (os.getenv("RELATED_NEWS_EMBED_ENDPOINT") or "").strip()
+RELATED_NEWS_EMBED_API_KEY = (os.getenv("RELATED_NEWS_EMBED_API_KEY") or "").strip()
+RELATED_NEWS_EMBED_TIMEOUT = float(os.getenv("RELATED_NEWS_EMBED_TIMEOUT", "20"))
+
+
+def now_kst_iso():
+    return datetime.now(KST).isoformat()
+
+
+def safe_json_loads(value, default):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
+
+
+class RelatedNewsMatcher:
+    MAX_VECTOR_TEXT_CHARS = 6000
+    MAX_ATTACHMENTS = 3
+    DENSE_DIM = 256
+    KEYWORD_WEIGHT = 0.6
+    RRF_WEIGHT = 0.4
+    RRF_K = 60
+    MIN_FINAL_SCORE = 0.18
+    MIN_KEYWORD_SCORE = 0.12
+
+    STOPWORDS = {
+        "보도자료", "보도", "자료", "관련", "안내", "공지", "대한", "위한", "및", "등", "기자", "뉴스",
+        "정부", "경제", "정책", "지원", "추진", "운영", "개선", "발표", "기준", "계획", "최근", "주요",
+        "대한민국", "한국", "금융", "위원회", "원", "기사", "속보",
+    }
+
+    def __init__(self, conn):
+        self.conn = conn
+        self._ensure_schema()
+
+    def _ensure_schema(self):
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS article_embeddings (
+              article_id INTEGER NOT NULL,
+              model_name TEXT NOT NULL,
+              text_hash TEXT NOT NULL,
+              vector_json TEXT NOT NULL,
+              source_text TEXT,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(article_id, model_name)
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS related_news_feedback (
+              source_article_id INTEGER NOT NULL,
+              news_article_id INTEGER NOT NULL,
+              final_score REAL,
+              keyword_rule_score REAL,
+              rrf_score REAL,
+              sparse_rank INTEGER,
+              dense_rank INTEGER,
+              match_reasons TEXT,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_article_embeddings_model ON article_embeddings(model_name)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_related_news_feedback_source ON related_news_feedback(source_article_id)"
+        )
+        self.conn.commit()
+
+    @classmethod
+    def is_news_row(cls, row):
+        source_channel = (row["source_channel"] or "").strip().lower()
+        source_system = (row["source_system"] or "").strip().lower()
+        org = (row["organization"] or "").strip().lower()
+        if source_channel in NEWS_SOURCE_CHANNEL_HINTS or source_system in NEWS_SOURCE_SYSTEM_HINTS:
+            return True
+        if "news" in source_channel or "news" in source_system:
+            return True
+        return "arirang" in org
+
+    @classmethod
+    def extract_keywords(cls, text):
+        if not text:
+            return []
+        tokens = re.findall(r"[가-힣A-Za-z0-9]{2,}", text)
+        cleaned = []
+        for token in tokens:
+            lowered = token.lower()
+            if lowered in cls.STOPWORDS:
+                continue
+            if len(lowered) <= 1:
+                continue
+            cleaned.append(lowered)
+        return cleaned
+
+    @classmethod
+    def unique_tokens(cls, text):
+        return set(cls.extract_keywords(text))
+
+    @classmethod
+    def summarize_text(cls, text, limit=280):
+        text = re.sub(r"\s+", " ", (text or "")).strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    def fetch_article(self, article_id):
+        row = self.conn.execute(
+            """
+            SELECT id, source_system, source_channel, title, published_at, organization, department,
+                   content_text, raw_json
+            FROM articles
+            WHERE id = ?
+            """,
+            (article_id,),
+        ).fetchone()
+        if not row:
+            return None
+
+        attachment_rows = self.conn.execute(
+            """
+            SELECT at.id, at.file_name, e.text_content
+            FROM attachments at
+            LEFT JOIN attachment_extractions e
+              ON e.document_id = at.document_id
+             AND e.status = 'success'
+            WHERE at.article_id = ?
+            ORDER BY at.id ASC
+            """,
+            (article_id,),
+        ).fetchall()
+        attachments = []
+        for att in attachment_rows:
+            text_content = (att["text_content"] or "").strip()
+            if not text_content:
+                continue
+            attachments.append(
+                {
+                    "id": att["id"],
+                    "file_name": att["file_name"] or "",
+                    "text_content": text_content,
+                }
+            )
+        payload = dict(row)
+        payload["attachments_text"] = attachments
+        payload["raw"] = safe_json_loads(payload.get("raw_json"), {})
+        return payload
+
+    def build_document_text(self, article):
+        sections = []
+        if article.get("title"):
+            sections.append(f"[TITLE]\n{article['title']}")
+
+        attachment_chunks = []
+        for att in article.get("attachments_text", [])[: self.MAX_ATTACHMENTS]:
+            text = self.summarize_text(att.get("text_content", ""), limit=1800)
+            if text:
+                attachment_chunks.append(f"[ATTACHMENT:{att.get('file_name') or 'file'}]\n{text}")
+        if attachment_chunks:
+            sections.append("\n\n".join(attachment_chunks))
+
+        body_text = self.summarize_text(article.get("content_text", ""), limit=2200)
+        if body_text:
+            sections.append(f"[BODY]\n{body_text}")
+
+        return "\n\n".join(part for part in sections if part).strip()
+
+    def text_hash(self, text):
+        return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+    def embed_text(self, text):
+        if RELATED_NEWS_EMBED_ENDPOINT:
+            headers = {"Content-Type": "application/json"}
+            if RELATED_NEWS_EMBED_API_KEY:
+                headers["Authorization"] = f"Bearer {RELATED_NEWS_EMBED_API_KEY}"
+            resp = requests.post(
+                RELATED_NEWS_EMBED_ENDPOINT,
+                headers=headers,
+                json={"model": RELATED_NEWS_EMBED_MODEL, "input": text},
+                timeout=RELATED_NEWS_EMBED_TIMEOUT,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            data = body.get("data") or []
+            if not data or "embedding" not in data[0]:
+                raise ValueError("embedding response missing data[0].embedding")
+            vector = np.asarray(data[0]["embedding"], dtype=np.float32)
+        else:
+            vector = self._fallback_embed_text(text)
+
+        norm = np.linalg.norm(vector)
+        if norm == 0:
+            return vector.tolist()
+        return (vector / norm).astype(np.float32).tolist()
+
+    def _fallback_embed_text(self, text):
+        vector = np.zeros(self.DENSE_DIM, dtype=np.float32)
+        for token in self.extract_keywords(text):
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            idx = int.from_bytes(digest[:2], "big") % self.DENSE_DIM
+            sign = 1.0 if digest[2] % 2 == 0 else -1.0
+            weight = 1.0 + ((digest[3] % 7) / 10.0)
+            vector[idx] += sign * weight
+        return vector
+
+    def get_or_create_embedding(self, article_id, text):
+        text = (text or "")[: self.MAX_VECTOR_TEXT_CHARS]
+        text_hash = self.text_hash(text)
+        row = self.conn.execute(
+            """
+            SELECT text_hash, vector_json
+            FROM article_embeddings
+            WHERE article_id = ? AND model_name = ?
+            """,
+            (article_id, RELATED_NEWS_EMBED_MODEL),
+        ).fetchone()
+        if row and row["text_hash"] == text_hash:
+            return np.asarray(safe_json_loads(row["vector_json"], []), dtype=np.float32)
+
+        vector = self.embed_text(text)
+        self.conn.execute(
+            """
+            INSERT INTO article_embeddings (article_id, model_name, text_hash, vector_json, source_text, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(article_id, model_name) DO UPDATE SET
+              text_hash = excluded.text_hash,
+              vector_json = excluded.vector_json,
+              source_text = excluded.source_text,
+              updated_at = excluded.updated_at
+            """,
+            (
+                article_id,
+                RELATED_NEWS_EMBED_MODEL,
+                text_hash,
+                json.dumps(vector, ensure_ascii=False),
+                text,
+                now_kst_iso(),
+            ),
+        )
+        self.conn.commit()
+        return np.asarray(vector, dtype=np.float32)
+
+    def build_sparse_query(self, article):
+        title_tokens = self.extract_keywords(article.get("title", ""))
+        attachment_tokens = []
+        for att in article.get("attachments_text", [])[: self.MAX_ATTACHMENTS]:
+            attachment_tokens.extend(self.extract_keywords(att.get("text_content", ""))[:20])
+        body_tokens = self.extract_keywords(article.get("content_text", ""))[:20]
+
+        scored = Counter()
+        for token in title_tokens[:12]:
+            scored[token] += 4
+        for token in attachment_tokens[:30]:
+            scored[token] += 3
+        for token in body_tokens:
+            scored[token] += 1
+        top_terms = [token for token, _ in scored.most_common(12)]
+        if not top_terms:
+            return ""
+        return " OR ".join(f'"{term}"' for term in top_terms)
+
+    def extract_named_entities(self, article):
+        bag = []
+        bag.extend(self.extract_keywords(article.get("title", "")))
+        bag.extend(self.extract_keywords(article.get("organization", "")))
+        for att in article.get("attachments_text", [])[: self.MAX_ATTACHMENTS]:
+            bag.extend(self.extract_keywords(att.get("text_content", ""))[:30])
+        counts = Counter(token for token in bag if len(token) >= 3)
+        return {token for token, freq in counts.items() if freq >= 1}
+
+    def keyword_rule_score(self, source_article, news_article):
+        source_title = self.unique_tokens(source_article.get("title", ""))
+        source_body = self.unique_tokens(source_article.get("content_text", ""))
+        source_attach = set()
+        for att in source_article.get("attachments_text", [])[: self.MAX_ATTACHMENTS]:
+            source_attach |= self.unique_tokens(att.get("text_content", ""))
+        source_entities = self.extract_named_entities(source_article)
+
+        news_title = self.unique_tokens(news_article.get("title", ""))
+        news_body = self.unique_tokens(news_article.get("content_text", ""))
+        news_entities = self.extract_named_entities(news_article)
+
+        score = 0.0
+        reasons = []
+
+        title_overlap = source_title & news_title
+        if title_overlap:
+            score += min(0.28, 0.08 * len(title_overlap))
+            reasons.append("제목 키워드 일치")
+
+        attachment_overlap = source_attach & (news_title | news_body)
+        if attachment_overlap:
+            score += min(0.34, 0.07 * len(attachment_overlap))
+            reasons.append("첨부 핵심어 일치")
+
+        entity_overlap = source_entities & news_entities
+        if entity_overlap:
+            score += min(0.26, 0.08 * len(entity_overlap))
+            reasons.append("고유명사 일치")
+
+        body_overlap = source_body & news_body
+        if body_overlap:
+            score += min(0.18, 0.03 * len(body_overlap))
+            reasons.append("본문 키워드 유사")
+
+        source_org = (source_article.get("organization") or "").strip().lower()
+        news_org = (news_article.get("organization") or "").strip().lower()
+        if source_org and news_org and source_org == news_org:
+            score += 0.08
+            reasons.append("기관명 일치")
+
+        src_date = (source_article.get("published_at") or "")[:10]
+        news_date = (news_article.get("published_at") or "")[:10]
+        if src_date and news_date:
+            try:
+                day_gap = abs((datetime.fromisoformat(src_date) - datetime.fromisoformat(news_date)).days)
+                date_score = max(0.0, 1 - (day_gap / 90))
+                if date_score > 0:
+                    score += 0.12 * date_score
+                    reasons.append("시점 인접")
+            except ValueError:
+                pass
+
+        return min(score, 1.0), reasons
+
+    def fetch_sparse_candidates(self, article_id, article, limit=50):
+        match_query = self.build_sparse_query(article)
+        if not match_query:
+            return {}
+        rows = self.conn.execute(
+            """
+            SELECT a.id, a.source_system, a.source_channel, a.title, a.published_at, a.organization, a.department,
+                   a.content_text, a.raw_json, bm25(f.articles_fts) AS bm25_score
+            FROM articles a
+            JOIN articles_fts f ON a.id = f.rowid
+            WHERE f.articles_fts MATCH ?
+              AND a.id <> ?
+            ORDER BY bm25_score
+            LIMIT 200
+            """,
+            (match_query, article_id),
+        ).fetchall()
+
+        ranked = {}
+        rank = 1
+        for row in rows:
+            if not self.is_news_row(row):
+                continue
+            ranked[row["id"]] = {"rank": rank, "row": dict(row)}
+            rank += 1
+            if rank > limit:
+                break
+        return ranked
+
+    def fetch_dense_candidates(self, article_id, article, limit=50):
+        source_vector = self.get_or_create_embedding(article_id, self.build_document_text(article))
+        rows = self.conn.execute(
+            """
+            SELECT id, source_system, source_channel, title, published_at, organization, department, content_text, raw_json
+            FROM articles
+            WHERE id <> ?
+            ORDER BY published_at DESC, id DESC
+            LIMIT 600
+            """,
+            (article_id,),
+        ).fetchall()
+
+        ranked = []
+        for row in rows:
+            if not self.is_news_row(row):
+                continue
+            row_dict = dict(row)
+            text = self.build_document_text(row_dict)
+            if not text:
+                continue
+            vector = self.get_or_create_embedding(row["id"], text)
+            score = float(np.dot(source_vector, vector))
+            ranked.append((score, row_dict))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+
+        out = {}
+        for idx, (score, row_dict) in enumerate(ranked[:limit], start=1):
+            out[row_dict["id"]] = {"rank": idx, "score": score, "row": row_dict}
+        return out
+
+    def related_news(self, article_id, limit=5):
+        source_article = self.fetch_article(article_id)
+        if not source_article:
+            raise KeyError("article not found")
+
+        sparse = self.fetch_sparse_candidates(article_id, source_article)
+        dense = self.fetch_dense_candidates(article_id, source_article)
+        candidate_ids = set(sparse) | set(dense)
+        if not candidate_ids:
+            return []
+
+        results = []
+        for candidate_id in candidate_ids:
+            news_article = self.fetch_article(candidate_id)
+            if not news_article:
+                continue
+
+            keyword_score, reasons = self.keyword_rule_score(source_article, news_article)
+            sparse_rank = sparse.get(candidate_id, {}).get("rank")
+            dense_rank = dense.get(candidate_id, {}).get("rank")
+            substantive_reasons = [reason for reason in reasons if reason != "시점 인접"]
+
+            rrf_score = 0.0
+            if sparse_rank:
+                rrf_score += 1.0 / (self.RRF_K + sparse_rank)
+            if dense_rank:
+                rrf_score += 1.0 / (self.RRF_K + dense_rank)
+            rrf_score *= self.RRF_K / 2.0
+            rrf_score = min(rrf_score, 1.0)
+
+            final_score = (self.KEYWORD_WEIGHT * keyword_score) + (self.RRF_WEIGHT * rrf_score)
+            if keyword_score < self.MIN_KEYWORD_SCORE or final_score < self.MIN_FINAL_SCORE or not substantive_reasons:
+                continue
+
+            summary_source = news_article.get("content_text") or ""
+            results.append(
+                {
+                    "id": news_article["id"],
+                    "title": news_article.get("title"),
+                    "published_at": news_article.get("published_at"),
+                    "organization": news_article.get("organization"),
+                    "summary": self.summarize_text(summary_source, limit=140),
+                    "source_channel": news_article.get("source_channel"),
+                    "final_score": round(final_score, 4),
+                    "keyword_rule_score": round(keyword_score, 4),
+                    "rrf_score": round(rrf_score, 4),
+                    "sparse_rank": sparse_rank,
+                    "dense_rank": dense_rank,
+                    "reasons": reasons[:3],
+                }
+            )
+
+        results.sort(key=lambda item: (item["final_score"], item.get("published_at") or ""), reverse=True)
+        trimmed = results[:limit]
+        self.conn.execute("DELETE FROM related_news_feedback WHERE source_article_id = ?", (article_id,))
+        for item in trimmed:
+            self.conn.execute(
+                """
+                INSERT INTO related_news_feedback (
+                  source_article_id, news_article_id, final_score, keyword_rule_score, rrf_score,
+                  sparse_rank, dense_rank, match_reasons, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    article_id,
+                    item["id"],
+                    item["final_score"],
+                    item["keyword_rule_score"],
+                    item["rrf_score"],
+                    item["sparse_rank"],
+                    item["dense_rank"],
+                    json.dumps(item["reasons"], ensure_ascii=False),
+                    now_kst_iso(),
+                ),
+            )
+        self.conn.commit()
+        return trimmed
 
 
 def to_int(value, default):
@@ -261,6 +749,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not self._require_auth_api():
                 return
             self.handle_article_report(qs)
+            return
+
+        if path == "/api/related-news":
+            if not self._require_auth_api():
+                return
+            self.handle_related_news(qs)
             return
 
         if path == "/api/similar":
@@ -893,6 +1387,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "id": article_id,
                 "items": items
             })
+        finally:
+            conn.close()
+
+    def handle_related_news(self, qs):
+        article_id = to_int(qs.get("id", ["0"])[0], 0)
+        limit = max(1, min(5, to_int((qs.get("limit", ["5"])[0] or "5"), 5)))
+        if article_id <= 0:
+            self._json_response({"error": "id is required"}, status=400)
+            return
+
+        conn = self._db()
+        try:
+            matcher = RelatedNewsMatcher(conn)
+            try:
+                items = matcher.related_news(article_id, limit=limit)
+            except KeyError:
+                self._json_response({"error": "article not found"}, status=404)
+                return
+            self._json_response({"id": article_id, "items": items})
         finally:
             conn.close()
 

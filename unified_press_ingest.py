@@ -3,6 +3,7 @@ import datetime as dt
 import hashlib
 import html
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -898,6 +899,151 @@ class DataGoApiCollector:
                 }
             )
         return out
+
+class ArirangNewsCollector:
+    def __init__(
+        self,
+        http: HttpClient,
+        api_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        source_file: Optional[str] = None,
+        sleep_sec: float = 0.2,
+    ):
+        self.http = http
+        self.api_url = api_url or os.getenv("ARIRANG_NEWS_API_URL")
+        self.api_key = api_key or os.getenv("ARIRANG_NEWS_API_KEY")
+        self.source_file = source_file or os.getenv("ARIRANG_NEWS_SOURCE_FILE")
+        self.sleep_sec = sleep_sec
+
+    @staticmethod
+    def _pick(item: Dict[str, Any], *keys: str) -> Optional[str]:
+        for key in keys:
+            value = item.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
+    def _normalize_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        source_item_id = self._pick(item, "id", "uuid", "hash", "article_id", "news_id", "source_item_id")
+        title = self._pick(item, "title", "headline", "newsTitle")
+        published_raw = self._pick(item, "published_at", "publishedAt", "pubDate", "regDate", "date")
+        content_html = self._pick(item, "content_html", "contentHtml", "body_html", "bodyHtml")
+        content_text = self._pick(
+            item,
+            "content_text",
+            "contentText",
+            "body",
+            "full_text",
+            "fullText",
+            "description",
+            "summary",
+        )
+        if not content_text and content_html:
+            content_text = html_to_text(content_html)
+
+        if not source_item_id:
+            fallback_source = self._pick(item, "detail_url", "original_url", "link", "url")
+            source_item_id = fallback_source or title
+        if not source_item_id or not title:
+            return None
+
+        published_at = parse_api_datetime(published_raw or "")
+        original_url = self._pick(item, "original_url", "originalUrl", "link", "url")
+        detail_url = self._pick(item, "detail_url", "detailUrl", "link", "url") or original_url
+        organization = self._pick(item, "organization", "publisher", "press", "source") or "Arirang News"
+
+        raw = dict(item)
+        raw["collector"] = "arirang_news_api"
+        return {
+            "source_system": "arirang_news_api",
+            "source_channel": "arirang_news_api",
+            "source_item_id": source_item_id,
+            "title": title,
+            "published_at": published_at,
+            "organization": organization,
+            "department": None,
+            "original_url": original_url,
+            "detail_url": detail_url,
+            "content_html": content_html,
+            "content_text": content_text,
+            "attachments": [],
+            "raw": raw,
+        }
+
+    def _load_from_file(self) -> List[Dict[str, Any]]:
+        if not self.source_file:
+            return []
+        path = Path(self.source_file)
+        if not path.exists():
+            raise FileNotFoundError(f"Arirang news source file not found: {path}")
+
+        text = path.read_text(encoding="utf-8-sig")
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            items = payload.get("items") or payload.get("data") or payload.get("articles") or []
+        elif isinstance(payload, list):
+            items = payload
+        else:
+            items = []
+
+        out: List[Dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            normalized = self._normalize_item(item)
+            if normalized:
+                out.append(normalized)
+        return out
+
+    def _load_from_api(self, start_date: str, end_date: str, max_pages: int = 1) -> List[Dict[str, Any]]:
+        if not self.api_url:
+            return []
+
+        out: List[Dict[str, Any]] = []
+        headers = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        for page in range(1, max_pages + 1):
+            params = {
+                "startDate": start_date,
+                "endDate": end_date,
+                "page": str(page),
+            }
+            resp = self.http.get(self.api_url, params=params, headers=headers)
+            body = resp.json()
+            if isinstance(body, dict):
+                items = body.get("items") or body.get("data") or body.get("articles") or []
+            elif isinstance(body, list):
+                items = body
+            else:
+                items = []
+
+            page_items = 0
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                normalized = self._normalize_item(item)
+                if normalized:
+                    out.append(normalized)
+                    page_items += 1
+            if page_items == 0:
+                break
+            time.sleep(self.sleep_sec)
+        return out
+
+    def ingest(self, start_date: str, end_date: str, max_pages: int = 1) -> List[Dict[str, Any]]:
+        file_items = self._load_from_file()
+        if file_items:
+            print(f"[ArirangNews:file] loaded {len(file_items)} items from {self.source_file}")
+            return file_items
+
+        api_items = self._load_from_api(start_date=start_date, end_date=end_date, max_pages=max_pages)
+        print(f"[ArirangNews:api] loaded {len(api_items)} items")
+        return api_items
 
 
 class FssCollector:
@@ -2883,6 +3029,7 @@ class IngestRunOptions:
     include_krx_notice: bool = True
     include_kofia_recent: bool = True
     include_kofia_notice: bool = True
+    include_arirang_news: bool = False
     include_fss_admin: bool = True
     fss_max_pages: int = 1
     ksd_max_pages: int = 3
@@ -2897,6 +3044,7 @@ class IngestRunOptions:
     krx_notice_max_pages: int = 1
     kofia_recent_max_pages: int = 1
     kofia_notice_max_pages: int = 1
+    arirang_news_max_pages: int = 1
     fss_admin_max_pages: int = 1
     api_orgs: Optional[Sequence[str]] = None
     precompute_analytics: bool = True
@@ -2931,6 +3079,7 @@ class UnifiedPressIngestService:
         ksd_rule_collector: Optional[KsdRuleChangeNoticeCollector] = None,
         krx_collector: Optional[KrxCollector] = None,
         kofia_collector: Optional[KofiaCollector] = None,
+        arirang_news_collector: Optional[ArirangNewsCollector] = None,
         fss_admin_collector: Optional[FssAdminGuidanceCollector] = None,
     ):
         self.http = http or HttpClient()
@@ -2946,6 +3095,7 @@ class UnifiedPressIngestService:
         self.ksd_rule_collector = ksd_rule_collector or KsdRuleChangeNoticeCollector(self.http)
         self.krx_collector = krx_collector or KrxCollector()
         self.kofia_collector = kofia_collector or KofiaCollector()
+        self.arirang_news_collector = arirang_news_collector or ArirangNewsCollector(self.http)
         self.fss_admin_collector = fss_admin_collector or FssAdminGuidanceCollector(self.http)
 
     @staticmethod
@@ -3057,6 +3207,16 @@ class UnifiedPressIngestService:
                 source_key="kofia_notice_scrape",
                 enabled=options.include_kofia_notice,
                 fetch_fn=lambda: self.kofia_collector.ingest_rule_change_notices(max_pages=options.kofia_notice_max_pages),
+            ),
+            CollectorRunSpec(
+                label="Arirang News",
+                source_key="arirang_news_api",
+                enabled=options.include_arirang_news,
+                fetch_fn=lambda: self.arirang_news_collector.ingest(
+                    start_date=options.start_date,
+                    end_date=options.end_date,
+                    max_pages=options.arirang_news_max_pages,
+                ),
             ),
         ]
 
@@ -3178,6 +3338,7 @@ class UnifiedIngestCliApp:
         "krx-notice",
         "kofia-recent",
         "kofia-notice",
+        "arirang-news",
     ]
     COLLECTOR_NO_FLAG = {
         "api": "no_api",
@@ -3195,6 +3356,7 @@ class UnifiedIngestCliApp:
         "krx-notice": "no_krx_notice",
         "kofia-recent": "no_kofia_recent",
         "kofia-notice": "no_kofia_notice",
+        "arirang-news": "no_arirang_news",
     }
 
     def __init__(self, http: Optional[HttpClient] = None):
@@ -3234,6 +3396,7 @@ class UnifiedIngestCliApp:
         parser.add_argument("--no-krx-notice", action="store_true", help="Disable KRX rule-change notice collector")
         parser.add_argument("--no-kofia-recent", action="store_true", help="Disable KOFIA recent rule-change collector")
         parser.add_argument("--no-kofia-notice", action="store_true", help="Disable KOFIA rule-change notice collector")
+        parser.add_argument("--no-arirang-news", action="store_true", help="Disable Arirang news collector")
 
         parser.add_argument("--fss-max-pages", type=int, default=1, help="Max pages per FSS board")
         parser.add_argument("--fss-admin-max-pages", type=int, default=1, help="Max pages for FSS admin-guidance")
@@ -3249,6 +3412,7 @@ class UnifiedIngestCliApp:
         parser.add_argument("--krx-notice-max-pages", type=int, default=1, help="Max pages for KRX rule-change notices")
         parser.add_argument("--kofia-recent-max-pages", type=int, default=1, help="Max pages for KOFIA recent rule changes")
         parser.add_argument("--kofia-notice-max-pages", type=int, default=1, help="Max pages for KOFIA rule-change notices")
+        parser.add_argument("--arirang-news-max-pages", type=int, default=1, help="Max pages for Arirang news collector")
 
         parser.add_argument("--preview-json", default="ingest_preview.json", help="Output summary JSON path")
         parser.add_argument(
@@ -3280,6 +3444,7 @@ class UnifiedIngestCliApp:
             include_krx_notice=not args.no_krx_notice,
             include_kofia_recent=not args.no_kofia_recent,
             include_kofia_notice=not args.no_kofia_notice,
+            include_arirang_news=not args.no_arirang_news,
             fss_max_pages=args.fss_max_pages,
             fss_admin_max_pages=args.fss_admin_max_pages,
             ksd_max_pages=args.ksd_max_pages,
@@ -3294,6 +3459,7 @@ class UnifiedIngestCliApp:
             krx_notice_max_pages=args.krx_notice_max_pages,
             kofia_recent_max_pages=args.kofia_recent_max_pages,
             kofia_notice_max_pages=args.kofia_notice_max_pages,
+            arirang_news_max_pages=args.arirang_news_max_pages,
             api_orgs=args.api_orgs,
             precompute_analytics=not args.skip_analytics,
             collector_retry_attempts=args.collector_retry_attempts,
