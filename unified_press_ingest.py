@@ -901,6 +901,12 @@ class DataGoApiCollector:
         return out
 
 class ArirangNewsCollector:
+    DEFAULT_API_URL = "https://api-v2.deepsearch.com/v1/articles"
+    DEFAULT_QUERY = (
+        '("금융위원회" OR "금융감독원" OR "한국은행" OR "금융투자협회" OR "한국거래소" '
+        'OR "예탁결제원" OR "가계대출" OR "국민성장펀드" OR "행정지도" OR "규정 개정")'
+    )
+
     def __init__(
         self,
         http: HttpClient,
@@ -910,10 +916,11 @@ class ArirangNewsCollector:
         sleep_sec: float = 0.2,
     ):
         self.http = http
-        self.api_url = api_url or os.getenv("ARIRANG_NEWS_API_URL")
-        self.api_key = api_key or os.getenv("ARIRANG_NEWS_API_KEY")
+        self.api_url = api_url or os.getenv("ARIRANG_NEWS_API_URL") or self.DEFAULT_API_URL
+        self.api_key = api_key or os.getenv("ARIRANG_NEWS_API_KEY") or os.getenv("NEWS_API_KEY")
         self.source_file = source_file or os.getenv("ARIRANG_NEWS_SOURCE_FILE")
         self.sleep_sec = sleep_sec
+        self.default_keyword = os.getenv("ARIRANG_NEWS_KEYWORD") or self.DEFAULT_QUERY
 
     @staticmethod
     def _pick(item: Dict[str, Any], *keys: str) -> Optional[str]:
@@ -927,9 +934,9 @@ class ArirangNewsCollector:
         return None
 
     def _normalize_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        source_item_id = self._pick(item, "id", "uuid", "hash", "article_id", "news_id", "source_item_id")
+        source_item_id = self._pick(item, "uid", "id", "uuid", "hash", "article_id", "news_id", "source_item_id")
         title = self._pick(item, "title", "headline", "newsTitle")
-        published_raw = self._pick(item, "published_at", "publishedAt", "pubDate", "regDate", "date")
+        published_raw = self._pick(item, "published_at", "publishedAt", "created_at", "createdAt", "pubDate", "regDate", "date")
         content_html = self._pick(item, "content_html", "contentHtml", "body_html", "bodyHtml")
         content_text = self._pick(
             item,
@@ -940,7 +947,14 @@ class ArirangNewsCollector:
             "fullText",
             "description",
             "summary",
+            "summary_text",
+            "summaryText",
         )
+        highlight = item.get("highlight")
+        if not content_text and isinstance(highlight, dict):
+            title_hl = highlight.get("title")
+            body_hl = highlight.get("content") or highlight.get("body")
+            content_text = " ".join(part for part in [title_hl, body_hl] if part)
         if not content_text and content_html:
             content_text = html_to_text(content_html)
 
@@ -953,7 +967,7 @@ class ArirangNewsCollector:
         published_at = parse_api_datetime(published_raw or "")
         original_url = self._pick(item, "original_url", "originalUrl", "link", "url")
         detail_url = self._pick(item, "detail_url", "detailUrl", "link", "url") or original_url
-        organization = self._pick(item, "organization", "publisher", "press", "source") or "Arirang News"
+        organization = self._pick(item, "organization", "publisher", "press", "source", "publisher_name") or "Arirang News"
 
         raw = dict(item)
         raw["collector"] = "arirang_news_api"
@@ -999,21 +1013,23 @@ class ArirangNewsCollector:
         return out
 
     def _load_from_api(self, start_date: str, end_date: str, max_pages: int = 1) -> List[Dict[str, Any]]:
-        if not self.api_url:
+        if not self.api_url or not self.api_key:
             return []
 
         out: List[Dict[str, Any]] = []
-        headers = {}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
 
         for page in range(1, max_pages + 1):
             params = {
-                "startDate": start_date,
-                "endDate": end_date,
+                "keyword": self.default_keyword,
+                "date_from": f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}",
+                "date_to": f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}",
                 "page": str(page),
+                "page_size": "100",
+                "order": "published_at",
+                "uniquify": "true",
+                "api_key": self.api_key,
             }
-            resp = self.http.get(self.api_url, params=params, headers=headers)
+            resp = self.http.get(self.api_url, params=params)
             body = resp.json()
             if isinstance(body, dict):
                 items = body.get("items") or body.get("data") or body.get("articles") or []
