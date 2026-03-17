@@ -4,7 +4,6 @@ import html
 import hashlib
 import json
 import math
-import os
 import re
 import smtplib
 import socketserver
@@ -18,9 +17,6 @@ from email.mime.text import MIMEText
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-
-import numpy as np
-import requests
 
 try:
     from kiwipiepy import Kiwi
@@ -56,12 +52,6 @@ NEWS_SOURCE_SYSTEM_HINTS = {
     "arirang_news",
     "news_api",
 }
-RELATED_NEWS_EMBED_MODEL = os.getenv("RELATED_NEWS_EMBED_MODEL", "zembed-1")
-RELATED_NEWS_EMBED_ENDPOINT = (os.getenv("RELATED_NEWS_EMBED_ENDPOINT") or "").strip()
-RELATED_NEWS_EMBED_API_KEY = (os.getenv("RELATED_NEWS_EMBED_API_KEY") or "").strip()
-RELATED_NEWS_EMBED_TIMEOUT = float(os.getenv("RELATED_NEWS_EMBED_TIMEOUT", "20"))
-
-
 def now_kst_iso():
     return datetime.now(KST).isoformat()
 
@@ -76,14 +66,15 @@ def safe_json_loads(value, default):
 
 
 class RelatedNewsMatcher:
-    MAX_VECTOR_TEXT_CHARS = 6000
     MAX_ATTACHMENTS = 3
-    DENSE_DIM = 256
-    KEYWORD_WEIGHT = 0.6
-    RRF_WEIGHT = 0.4
-    RRF_K = 60
-    MIN_FINAL_SCORE = 0.18
-    MIN_KEYWORD_SCORE = 0.12
+    MIN_FINAL_SCORE = 0.22
+    MIN_KEYWORD_SCORE = 0.16
+    ADMIN_APPROVAL_TERMS = ("폐지", "승인", "인가", "등록", "취소", "정지", "공고", "행정예고", "조치")
+    WEAK_MATCH_TERMS = {
+        "금융", "투자", "업무", "시장", "경제", "활성화", "지원", "관리", "간담회", "정책", "제도",
+        "사업", "발표", "개최", "강화", "추진", "위원장", "기관", "정부",
+    }
+    CORP_SUFFIXES = ("주식회사", "㈜", "주", "유한회사", "유한", "법인")
 
     STOPWORDS = {
         "보도자료", "보도", "자료", "관련", "안내", "공지", "대한", "위한", "및", "등", "기자", "뉴스",
@@ -98,34 +89,16 @@ class RelatedNewsMatcher:
     def _ensure_schema(self):
         self.conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS article_embeddings (
-              article_id INTEGER NOT NULL,
-              model_name TEXT NOT NULL,
-              text_hash TEXT NOT NULL,
-              vector_json TEXT NOT NULL,
-              source_text TEXT,
-              updated_at TEXT NOT NULL,
-              PRIMARY KEY(article_id, model_name)
-            )
-            """
-        )
-        self.conn.execute(
-            """
             CREATE TABLE IF NOT EXISTS related_news_feedback (
               source_article_id INTEGER NOT NULL,
               news_article_id INTEGER NOT NULL,
               final_score REAL,
               keyword_rule_score REAL,
-              rrf_score REAL,
               sparse_rank INTEGER,
-              dense_rank INTEGER,
               match_reasons TEXT,
               created_at TEXT NOT NULL
             )
             """
-        )
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_article_embeddings_model ON article_embeddings(model_name)"
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_related_news_feedback_source ON related_news_feedback(source_article_id)"
@@ -230,81 +203,6 @@ class RelatedNewsMatcher:
 
         return "\n\n".join(part for part in sections if part).strip()
 
-    def text_hash(self, text):
-        return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
-
-    def embed_text(self, text):
-        if RELATED_NEWS_EMBED_ENDPOINT:
-            headers = {"Content-Type": "application/json"}
-            if RELATED_NEWS_EMBED_API_KEY:
-                headers["Authorization"] = f"Bearer {RELATED_NEWS_EMBED_API_KEY}"
-            resp = requests.post(
-                RELATED_NEWS_EMBED_ENDPOINT,
-                headers=headers,
-                json={"model": RELATED_NEWS_EMBED_MODEL, "input": text},
-                timeout=RELATED_NEWS_EMBED_TIMEOUT,
-            )
-            resp.raise_for_status()
-            body = resp.json()
-            data = body.get("data") or []
-            if not data or "embedding" not in data[0]:
-                raise ValueError("embedding response missing data[0].embedding")
-            vector = np.asarray(data[0]["embedding"], dtype=np.float32)
-        else:
-            vector = self._fallback_embed_text(text)
-
-        norm = np.linalg.norm(vector)
-        if norm == 0:
-            return vector.tolist()
-        return (vector / norm).astype(np.float32).tolist()
-
-    def _fallback_embed_text(self, text):
-        vector = np.zeros(self.DENSE_DIM, dtype=np.float32)
-        for token in self.extract_keywords(text):
-            digest = hashlib.sha256(token.encode("utf-8")).digest()
-            idx = int.from_bytes(digest[:2], "big") % self.DENSE_DIM
-            sign = 1.0 if digest[2] % 2 == 0 else -1.0
-            weight = 1.0 + ((digest[3] % 7) / 10.0)
-            vector[idx] += sign * weight
-        return vector
-
-    def get_or_create_embedding(self, article_id, text):
-        text = (text or "")[: self.MAX_VECTOR_TEXT_CHARS]
-        text_hash = self.text_hash(text)
-        row = self.conn.execute(
-            """
-            SELECT text_hash, vector_json
-            FROM article_embeddings
-            WHERE article_id = ? AND model_name = ?
-            """,
-            (article_id, RELATED_NEWS_EMBED_MODEL),
-        ).fetchone()
-        if row and row["text_hash"] == text_hash:
-            return np.asarray(safe_json_loads(row["vector_json"], []), dtype=np.float32)
-
-        vector = self.embed_text(text)
-        self.conn.execute(
-            """
-            INSERT INTO article_embeddings (article_id, model_name, text_hash, vector_json, source_text, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(article_id, model_name) DO UPDATE SET
-              text_hash = excluded.text_hash,
-              vector_json = excluded.vector_json,
-              source_text = excluded.source_text,
-              updated_at = excluded.updated_at
-            """,
-            (
-                article_id,
-                RELATED_NEWS_EMBED_MODEL,
-                text_hash,
-                json.dumps(vector, ensure_ascii=False),
-                text,
-                now_kst_iso(),
-            ),
-        )
-        self.conn.commit()
-        return np.asarray(vector, dtype=np.float32)
-
     def build_sparse_query(self, article):
         title_tokens = self.extract_keywords(article.get("title", ""))
         attachment_tokens = []
@@ -333,6 +231,34 @@ class RelatedNewsMatcher:
         counts = Counter(token for token in bag if len(token) >= 3)
         return {token for token, freq in counts.items() if freq >= 1}
 
+    @classmethod
+    def is_weak_match_term(cls, token):
+        return token in cls.WEAK_MATCH_TERMS
+
+    @classmethod
+    def looks_like_corporate_name(cls, token):
+        if len(token) < 3:
+            return False
+        if any(token.endswith(suffix) for suffix in cls.CORP_SUFFIXES):
+            return True
+        return bool(re.search(r"[a-z]", token)) or "홀딩스" in token or "자산운용" in token
+
+    def requires_entity_gate(self, article):
+        title = article.get("title", "")
+        return any(term in title for term in self.ADMIN_APPROVAL_TERMS)
+
+    def extract_gate_terms(self, article):
+        title_tokens = [token for token in self.extract_keywords(article.get("title", "")) if len(token) >= 3]
+        attach_tokens = []
+        for att in article.get("attachments_text", [])[: self.MAX_ATTACHMENTS]:
+            attach_tokens.extend(self.extract_keywords(att.get("text_content", ""))[:20])
+        gate_terms = {
+            token
+            for token in (title_tokens + attach_tokens)
+            if not self.is_weak_match_term(token) and self.looks_like_corporate_name(token)
+        }
+        return gate_terms
+
     def keyword_rule_score(self, source_article, news_article):
         source_title = self.unique_tokens(source_article.get("title", ""))
         source_body = self.unique_tokens(source_article.get("content_text", ""))
@@ -344,28 +270,35 @@ class RelatedNewsMatcher:
         news_title = self.unique_tokens(news_article.get("title", ""))
         news_body = self.unique_tokens(news_article.get("content_text", ""))
         news_entities = self.extract_named_entities(news_article)
+        news_all = news_title | news_body
 
         score = 0.0
         reasons = []
 
-        title_overlap = source_title & news_title
+        title_overlap = {token for token in (source_title & news_title) if not self.is_weak_match_term(token)}
         if title_overlap:
-            score += min(0.28, 0.08 * len(title_overlap))
+            score += min(0.36, 0.10 * len(title_overlap))
             reasons.append("제목 키워드 일치")
 
-        attachment_overlap = source_attach & (news_title | news_body)
+        attachment_overlap = {token for token in (source_attach & news_all) if not self.is_weak_match_term(token)}
         if attachment_overlap:
-            score += min(0.34, 0.07 * len(attachment_overlap))
+            score += min(0.40, 0.10 * len(attachment_overlap))
             reasons.append("첨부 핵심어 일치")
 
-        entity_overlap = source_entities & news_entities
+        entity_overlap = {
+            token for token in (source_entities & news_entities) if self.looks_like_corporate_name(token)
+        }
         if entity_overlap:
-            score += min(0.26, 0.08 * len(entity_overlap))
+            score += min(0.42, 0.14 * len(entity_overlap))
             reasons.append("고유명사 일치")
 
-        body_overlap = source_body & news_body
+        body_overlap = {
+            token
+            for token in (source_body & news_body)
+            if not self.is_weak_match_term(token) and len(token) >= 3
+        }
         if body_overlap:
-            score += min(0.18, 0.03 * len(body_overlap))
+            score += min(0.16, 0.02 * len(body_overlap))
             reasons.append("본문 키워드 유사")
 
         source_org = (source_article.get("organization") or "").strip().lower()
@@ -381,11 +314,20 @@ class RelatedNewsMatcher:
                 day_gap = abs((datetime.fromisoformat(src_date) - datetime.fromisoformat(news_date)).days)
                 date_score = max(0.0, 1 - (day_gap / 90))
                 if date_score > 0:
-                    score += 0.12 * date_score
+                    score += 0.08 * date_score
                     reasons.append("시점 인접")
             except ValueError:
                 pass
 
+        reason_map = {
+            "?쒕ぉ ?ㅼ썙???쇱튂": "제목 키워드 일치",
+            "泥⑤? ?듭떖???쇱튂": "첨부 핵심어 일치",
+            "怨좎쑀紐낆궗 ?쇱튂": "고유명사 일치",
+            "蹂몃Ц ?ㅼ썙???좎궗": "본문 키워드 유사",
+            "湲곌?紐??쇱튂": "기관명 일치",
+            "?쒖젏 ?몄젒": "시점 인접",
+        }
+        reasons = [reason_map.get(reason, reason) for reason in reasons]
         return min(score, 1.0), reasons
 
     def fetch_sparse_candidates(self, article_id, article, limit=50):
@@ -417,45 +359,13 @@ class RelatedNewsMatcher:
                 break
         return ranked
 
-    def fetch_dense_candidates(self, article_id, article, limit=50):
-        source_vector = self.get_or_create_embedding(article_id, self.build_document_text(article))
-        rows = self.conn.execute(
-            """
-            SELECT id, source_system, source_channel, title, published_at, organization, department, content_text, raw_json
-            FROM articles
-            WHERE id <> ?
-            ORDER BY published_at DESC, id DESC
-            LIMIT 600
-            """,
-            (article_id,),
-        ).fetchall()
-
-        ranked = []
-        for row in rows:
-            if not self.is_news_row(row):
-                continue
-            row_dict = dict(row)
-            text = self.build_document_text(row_dict)
-            if not text:
-                continue
-            vector = self.get_or_create_embedding(row["id"], text)
-            score = float(np.dot(source_vector, vector))
-            ranked.append((score, row_dict))
-        ranked.sort(key=lambda item: item[0], reverse=True)
-
-        out = {}
-        for idx, (score, row_dict) in enumerate(ranked[:limit], start=1):
-            out[row_dict["id"]] = {"rank": idx, "score": score, "row": row_dict}
-        return out
-
     def related_news(self, article_id, limit=5):
         source_article = self.fetch_article(article_id)
         if not source_article:
             raise KeyError("article not found")
 
         sparse = self.fetch_sparse_candidates(article_id, source_article)
-        dense = self.fetch_dense_candidates(article_id, source_article)
-        candidate_ids = set(sparse) | set(dense)
+        candidate_ids = set(sparse)
         if not candidate_ids:
             return []
 
@@ -467,18 +377,17 @@ class RelatedNewsMatcher:
 
             keyword_score, reasons = self.keyword_rule_score(source_article, news_article)
             sparse_rank = sparse.get(candidate_id, {}).get("rank")
-            dense_rank = dense.get(candidate_id, {}).get("rank")
+            sparse_score = max(0.0, 1 - ((max((sparse_rank or 1), 1) - 1) / 50.0))
+            reasons = [reason for reason in reasons if reason not in {"시점 인접", "본문 키워드 유사"}] or reasons
             substantive_reasons = [reason for reason in reasons if reason != "시점 인접"]
 
-            rrf_score = 0.0
-            if sparse_rank:
-                rrf_score += 1.0 / (self.RRF_K + sparse_rank)
-            if dense_rank:
-                rrf_score += 1.0 / (self.RRF_K + dense_rank)
-            rrf_score *= self.RRF_K / 2.0
-            rrf_score = min(rrf_score, 1.0)
+            if self.requires_entity_gate(source_article):
+                gate_terms = self.extract_gate_terms(source_article)
+                news_terms = self.unique_tokens(news_article.get("title", "")) | self.unique_tokens(news_article.get("content_text", ""))
+                if gate_terms and not (gate_terms & news_terms):
+                    continue
 
-            final_score = (self.KEYWORD_WEIGHT * keyword_score) + (self.RRF_WEIGHT * rrf_score)
+            final_score = (0.75 * keyword_score) + (0.25 * sparse_score)
             if keyword_score < self.MIN_KEYWORD_SCORE or final_score < self.MIN_FINAL_SCORE or not substantive_reasons:
                 continue
 
@@ -493,9 +402,7 @@ class RelatedNewsMatcher:
                     "source_channel": news_article.get("source_channel"),
                     "final_score": round(final_score, 4),
                     "keyword_rule_score": round(keyword_score, 4),
-                    "rrf_score": round(rrf_score, 4),
                     "sparse_rank": sparse_rank,
-                    "dense_rank": dense_rank,
                     "reasons": reasons[:3],
                 }
             )
@@ -507,19 +414,17 @@ class RelatedNewsMatcher:
             self.conn.execute(
                 """
                 INSERT INTO related_news_feedback (
-                  source_article_id, news_article_id, final_score, keyword_rule_score, rrf_score,
-                  sparse_rank, dense_rank, match_reasons, created_at
+                  source_article_id, news_article_id, final_score, keyword_rule_score,
+                  sparse_rank, match_reasons, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     article_id,
                     item["id"],
                     item["final_score"],
                     item["keyword_rule_score"],
-                    item["rrf_score"],
                     item["sparse_rank"],
-                    item["dense_rank"],
                     json.dumps(item["reasons"], ensure_ascii=False),
                     now_kst_iso(),
                 ),
