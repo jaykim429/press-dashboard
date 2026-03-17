@@ -393,6 +393,7 @@
 
     class ChannelUtil {
       static label(ch) {
+        if (ch === "arirang_news_api") return "뉴스기사";
         if (ch === "fss_press_explainer" || ch === "fsc_press_explainer") return "보도설명자료";
         if (ch === "fsc_admin_guidance_notice" || ch === "fss_admin_guidance_notice") return "행정지도예고";
         if (ch === "fsc_admin_guidance_enforcement" || ch === "fss_admin_guidance_enforcement") return "행정지도시행";

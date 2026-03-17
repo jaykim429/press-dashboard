@@ -65,6 +65,17 @@ def safe_json_loads(value, default):
         return default
 
 
+def is_news_source(source_channel="", source_system="", organization=""):
+    source_channel = (source_channel or "").strip().lower()
+    source_system = (source_system or "").strip().lower()
+    organization = (organization or "").strip().lower()
+    if source_channel in NEWS_SOURCE_CHANNEL_HINTS or source_system in NEWS_SOURCE_SYSTEM_HINTS:
+        return True
+    if "news" in source_channel or "news" in source_system:
+        return True
+    return "arirang" in organization
+
+
 class RelatedNewsMatcher:
     MAX_ATTACHMENTS = 3
     MIN_FINAL_SCORE = 0.22
@@ -107,14 +118,7 @@ class RelatedNewsMatcher:
 
     @classmethod
     def is_news_row(cls, row):
-        source_channel = (row["source_channel"] or "").strip().lower()
-        source_system = (row["source_system"] or "").strip().lower()
-        org = (row["organization"] or "").strip().lower()
-        if source_channel in NEWS_SOURCE_CHANNEL_HINTS or source_system in NEWS_SOURCE_SYSTEM_HINTS:
-            return True
-        if "news" in source_channel or "news" in source_system:
-            return True
-        return "arirang" in org
+        return is_news_source(row["source_channel"], row["source_system"], row["organization"])
 
     @classmethod
     def extract_keywords(cls, text):
@@ -842,7 +846,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     {"value": "no_action_opinion", "label": "\ube44\uc870\uce58\uc758\uacac\uc11c"},
                     {"value": "other_data", "label": "\uae30\ud0c0\uc790\ub8cc"},
                 ],
-                "organizations": [r[0] for r in conn.execute("SELECT DISTINCT organization FROM articles ORDER BY 1").fetchall() if r[0]],
+                "organizations": [
+                    r[0]
+                    for r in conn.execute(
+                        """
+                        SELECT DISTINCT organization
+                        FROM articles
+                        WHERE organization IS NOT NULL
+                          AND organization <> ''
+                          AND source_channel NOT IN ('arirang_news_api')
+                          AND source_system NOT IN ('arirang_news_api')
+                        ORDER BY 1
+                        """
+                    ).fetchall()
+                    if r[0]
+                ],
             }
             self._json_response(payload)
         finally:
@@ -913,7 +931,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
     def _build_query_parts(self, title_q="", press_type="", organization="", from_date="", to_date=""):
-        where = []
+        where = ["NOT (a.source_channel IN ('arirang_news_api') OR a.source_system IN ('arirang_news_api'))"]
         params = []
         join_sql = ""
 

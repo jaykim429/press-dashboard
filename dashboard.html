@@ -919,6 +919,7 @@
 
     class ChannelUtil {
       static label(sourceChannel) {
+        if (sourceChannel === "arirang_news_api") return "뉴스기사";
         if (sourceChannel === "fss_press_explainer" || sourceChannel === "fsc_press_explainer") return "보도설명자료";
         if (sourceChannel === "fsc_admin_guidance_notice" || sourceChannel === "fss_admin_guidance_notice") return "행정지도예고";
         if (sourceChannel === "fsc_admin_guidance_enforcement" || sourceChannel === "fss_admin_guidance_enforcement") return "행정지도시행";
