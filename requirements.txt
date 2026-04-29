@@ -6,3 +6,5 @@ playwright>=1.40.0
 pyyaml>=6.0
 pypdf>=5.1.0
 olefile>=0.47
+qdrant-client>=1.9.0
+sentence-transformers>=2.7.0

@@ -1,0 +1,43 @@
+services:
+  press-dashboard:
+    build: .
+    container_name: press-dashboard
+    depends_on:
+      - qdrant
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      DB_PATH: "/app/data/press_unified.db"
+      INTERNAL_RULE_DIR: "/app/data/internal_rules"
+      LLM_PROVIDER: "${LLM_PROVIDER:-openai}"
+      LLM_MODEL: "${LLM_MODEL:-google/gemma-4-26B-A4B-it}"
+      LLM_API_BASE: "${LLM_API_BASE:-http://222.110.207.7:8000/v1}"
+      LLM_API_KEY: "${LLM_API_KEY:-}"
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-sentence-transformers}"
+      EMBEDDING_API_BASE: "${EMBEDDING_API_BASE:-}"
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}"
+      EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
+      VECTOR_STORE: "${VECTOR_STORE:-qdrant}"
+      QDRANT_URL: "${QDRANT_URL:-http://qdrant:6333}"
+      QDRANT_COLLECTION: "${QDRANT_COLLECTION:-press_chunks}"
+    volumes:
+      - ./press_unified.db:/app/data/press_unified.db
+      - ./3. 내규목록:/app/data/internal_rules:ro
+      - ./attachment_store:/app/attachment_store
+      - ./logs:/app/logs
+      - ./tmp:/app/tmp
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: press-qdrant
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  qdrant_storage:

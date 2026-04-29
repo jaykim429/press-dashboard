@@ -146,6 +146,63 @@ class ReportOutputRepository:
 class PromptComposer:
     @staticmethod
     def compose(report_json: Dict[str, Any], title: str, profile: str, company_name: str) -> str:
+        task = report_json.get("task") or ""
+        if task == "internal_rule_impact_report" or profile == "internal_rule_impact":
+            topic = report_json.get("topic") or title or "행정지도 내규 영향도 분석"
+            instructions = report_json.get("instructions") or []
+            output_requirements = report_json.get("output_requirements") or []
+            guidance_sources = report_json.get("guidance_sources") or []
+            internal_rules = report_json.get("internal_rules") or []
+            inventory = report_json.get("rule_inventory") or {}
+
+            instructions_txt = "\n".join([f"- {x}" for x in instructions])
+            requirements_txt = "\n".join([f"- {x}" for x in output_requirements])
+            guidance_txt = []
+            for src in guidance_sources:
+                guidance_txt.append(
+                    (
+                        f"[guidance source_index={src.get('source_index')}] {src.get('title')} | "
+                        f"{src.get('organization')} | {src.get('published_at')} | {src.get('source_channel')}\n"
+                        f"첨부: {src.get('file_name') or '-'}\n{src.get('text','')}\n"
+                    )
+                )
+            rules_txt = []
+            for rule in internal_rules:
+                rules_txt.append(
+                    (
+                        f"[internal rule_id={rule.get('rule_id')}] {rule.get('rule_name')} | "
+                        f"score={rule.get('match_score')} | file={rule.get('source_file')}\n"
+                        f"match_terms={', '.join(rule.get('match_terms') or [])}\n"
+                        f"{rule.get('text','')}\n"
+                    )
+                )
+            guidance_blob = "\n\n".join(guidance_txt)
+            rules_blob = "\n\n".join(rules_txt)
+            return (
+                "[Context]\n"
+                f"You are an internal policy and compliance analyst supporting the internal rule management owner at {company_name}.\n"
+                "You compare Korean financial administrative guidance notices/enforcements with internal rules.\n"
+                "Your audience needs practical recommendations for internal rule updates, monitoring, and owner follow-up.\n\n"
+                "[Task]\n"
+                f"Topic: {topic}\n"
+                "Use only the provided guidance sources and internal rule excerpts as evidence. Write in Korean Markdown.\n\n"
+                "[Required analysis]\n"
+                "1) Classify each administrative guidance item as notice/enforcement where possible.\n"
+                "2) Identify impacted internal rules and explain the impact path.\n"
+                "3) Categorize action level: 개정 필요 / 점검 필요 / 모니터링 / 영향 낮음.\n"
+                "4) Recommend concrete improvements for the internal rule manager, including owner candidates, due dates, and monitoring triggers.\n"
+                "5) Include evidence citations using both guidance source_index and internal rule_id.\n\n"
+                "[Additional instructions]\n"
+                f"{instructions_txt}\n\n"
+                "[Output requirements]\n"
+                f"{requirements_txt}\n\n"
+                "[Rule inventory note]\n"
+                f"{json.dumps(inventory, ensure_ascii=False)}\n\n"
+                "[Guidance sources]\n"
+                f"{guidance_blob}\n\n"
+                "[Internal rules]\n"
+                f"{rules_blob}"
+            )
         topic = report_json.get("topic") or title or "regulatory analysis report"
         instructions = report_json.get("instructions") or []
         sources = report_json.get("sources") or []
@@ -215,9 +272,10 @@ class OpenAIChatClient:
     def generate(self, prompt: str) -> Tuple[str, str]:
         url = f"{self.api_base}/chat/completions"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         payload = {
             "model": self.model,
             "temperature": self.temperature,
@@ -269,7 +327,8 @@ class LlmReportPipelineApp:
     def _build_client(self):
         provider = self.cfg.provider.lower().strip()
         if provider == "openai":
-            if not self.cfg.api_key and not self.cfg.dry_run:
+            official_openai = self.cfg.api_base.rstrip("/") == "https://api.openai.com/v1"
+            if official_openai and not self.cfg.api_key and not self.cfg.dry_run:
                 raise ValueError("OPENAI_API_KEY is required unless --dry-run is used")
             return OpenAIChatClient(
                 api_key=self.cfg.api_key,
@@ -336,7 +395,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="LLM report generation pipeline")
     p.add_argument("--db-path", default="press_unified.db")
     p.add_argument("--provider", default=os.getenv("LLM_PROVIDER", "openai"))
-    p.add_argument("--model", default=os.getenv("LLM_MODEL", "gpt-4o-mini"))
+    p.add_argument("--model", default=os.getenv("LLM_MODEL", "google/gemma-4-26B-A4B-it"))
     p.add_argument("--api-base", default=os.getenv("LLM_API_BASE", ""))
     p.add_argument("--api-key", default=os.getenv("LLM_API_KEY", ""))
     p.add_argument("--max-outputs", type=int, default=5)
@@ -357,7 +416,7 @@ def main() -> None:
 
     if provider == "openai":
         if not api_base:
-            api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+            api_base = os.getenv("OPENAI_API_BASE", "http://222.110.207.7:8000/v1")
         if not api_key:
             api_key = os.getenv("OPENAI_API_KEY", "")
     elif provider == "google":

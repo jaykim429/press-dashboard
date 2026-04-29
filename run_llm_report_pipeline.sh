@@ -23,12 +23,12 @@ TS="$(date "+%Y%m%d_%H%M%S")"
 LOG_FILE="logs/llm_report_pipeline_${TS}.log"
 
 PROVIDER="${LLM_PROVIDER:-openai}"
-MODEL="${LLM_MODEL:-gpt-4o-mini}"
+MODEL="${LLM_MODEL:-google/gemma-4-26B-A4B-it}"
 if [ "$PROVIDER" = "google" ]; then
   MODEL="${LLM_MODEL:-gemini-2.0-flash}"
   API_BASE="${LLM_API_BASE:-${GOOGLE_API_BASE:-https://generativelanguage.googleapis.com/v1beta}}"
 else
-  API_BASE="${LLM_API_BASE:-${OPENAI_API_BASE:-https://api.openai.com/v1}}"
+  API_BASE="${LLM_API_BASE:-${OPENAI_API_BASE:-http://222.110.207.7:8000/v1}}"
 fi
 MAX_OUTPUTS="${LLM_MAX_OUTPUTS:-5}"
 TEMP="${LLM_TEMPERATURE:-0.2}"
@@ -46,7 +46,7 @@ if [ -z "$API_KEY" ]; then
   fi
 fi
 
-if [ -z "$API_KEY" ]; then
+if [ -z "$API_KEY" ] && { [ "$PROVIDER" = "google" ] || [ "$API_BASE" = "https://api.openai.com/v1" ]; }; then
   echo "[WARN] API key is empty for provider=${PROVIDER}. Running dry-run mode."
   "$PYTHON_BIN" llm_report_pipeline.py \
     --db-path "$DB_PATH" \

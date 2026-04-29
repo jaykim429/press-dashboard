@@ -1,0 +1,22 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+press_unified.db*
+service_key.txt
+.env
+
+logs
+tmp
+attachment_store
+3. 내규목록
+hwptest
+
+.claude
+.cursor
+.vscode

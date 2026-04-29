@@ -1,13 +1,20 @@
 import argparse
+import cgi
 import difflib
 import html
 import hashlib
 import json
 import math
+import os
+import queue
 import re
+import shlex
+import shutil
 import smtplib
 import socketserver
 import sqlite3
+import subprocess
+import tempfile
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
@@ -17,6 +24,17 @@ from email.mime.text import MIMEText
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+# Load .env file if exists
+env_path = Path(__file__).parent / ".env"
+if env_path.exists():
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                key, _, value = line.partition("=")
+                if key and value:
+                    os.environ[key.strip()] = value.strip()
 
 try:
     from kiwipiepy import Kiwi
@@ -74,6 +92,576 @@ def is_news_source(source_channel="", source_system="", organization=""):
     if "news" in source_channel or "news" in source_system:
         return True
     return "arirang" in organization
+
+
+class MCPError(Exception):
+    pass
+
+
+class KoreanLawMCPClient:
+    DEFAULT_TIMEOUT = 20
+
+    def __init__(self):
+        self.timeout = to_int(os.environ.get("KOREAN_LAW_MCP_TIMEOUT"), self.DEFAULT_TIMEOUT)
+        self._next_id = 1
+        self._messages = queue.Queue()
+        self._stderr_lines = queue.Queue()
+        self._process = None
+        self._reader_thread = None
+        self._stderr_thread = None
+
+    @staticmethod
+    def is_configured():
+        return bool((os.environ.get("LAW_OC") or "").strip())
+
+    @staticmethod
+    def command_preview():
+        command, args = KoreanLawMCPClient._command_parts()
+        return " ".join([command] + args)
+
+    @staticmethod
+    def _command_parts():
+        command = (os.environ.get("KOREAN_LAW_MCP_COMMAND") or "korean-law-mcp").strip()
+        extra_args = shlex.split(os.environ.get("KOREAN_LAW_MCP_ARGS") or "")
+
+        if os.name == "nt" and command == "korean-law-mcp":
+            command = shutil.which("korean-law-mcp.cmd") or shutil.which("korean-law-mcp") or command
+        return command, extra_args
+
+    @staticmethod
+    def available():
+        command, _ = KoreanLawMCPClient._command_parts()
+        return bool(shutil.which(command) or os.path.exists(command))
+
+    def __enter__(self):
+        if not self.is_configured():
+            raise MCPError("LAW_OC environment variable is not configured")
+
+        command, args = self._command_parts()
+        if not shutil.which(command) and not os.path.exists(command):
+            raise MCPError(
+                "korean-law-mcp command not found. Install it with npm or set KOREAN_LAW_MCP_COMMAND."
+            )
+
+        env = os.environ.copy()
+        self._process = subprocess.Popen(
+            [command] + args,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(BASE_DIR),
+            env=env,
+        )
+        self._reader_thread = threading.Thread(target=self._read_stdout_messages, daemon=True)
+        self._reader_thread.start()
+        self._stderr_thread = threading.Thread(target=self._read_stderr_lines, daemon=True)
+        self._stderr_thread.start()
+
+        self.request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "press-dashboard", "version": "0.1.0"},
+            },
+        )
+        self.notify("notifications/initialized", {})
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if not self._process:
+            return
+        try:
+            self._process.terminate()
+            self._process.wait(timeout=2)
+        except Exception:
+            self._process.kill()
+
+    def _read_stdout_messages(self):
+        try:
+            stdout = self._process.stdout
+            while True:
+                line = stdout.readline()
+                if not line:
+                    return
+                line_text = line.decode("utf-8", errors="replace").strip()
+                if line_text:
+                    self._messages.put(json.loads(line_text))
+        except Exception as exc:
+            self._messages.put({"error": {"message": f"MCP stdout read failed: {exc}"}})
+
+    def _read_stderr_lines(self):
+        try:
+            stderr = self._process.stderr
+            while True:
+                line = stderr.readline()
+                if not line:
+                    return
+                text = line.decode("utf-8", errors="replace").strip()
+                if text:
+                    self._stderr_lines.put(text)
+        except Exception:
+            return
+
+    def _stderr_tail(self, limit=5):
+        lines = []
+        while not self._stderr_lines.empty():
+            lines.append(self._stderr_lines.get_nowait())
+        return lines[-limit:]
+
+    def _send(self, payload):
+        if not self._process or not self._process.stdin:
+            raise MCPError("MCP process is not running")
+        if self._process.poll() is not None:
+            detail = "; ".join(self._stderr_tail()) or f"exit code {self._process.returncode}"
+            raise MCPError(f"MCP process exited before response: {detail}")
+
+        body = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        self._process.stdin.write(body)
+        self._process.stdin.flush()
+
+    def notify(self, method, params=None):
+        payload = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            payload["params"] = params
+        self._send(payload)
+
+    def request(self, method, params=None):
+        request_id = self._next_id
+        self._next_id += 1
+        payload = {"jsonrpc": "2.0", "id": request_id, "method": method}
+        if params is not None:
+            payload["params"] = params
+        self._send(payload)
+
+        deadline = time.time() + self.timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                detail = "; ".join(self._stderr_tail())
+                raise MCPError(f"MCP request timed out: {method}" + (f" ({detail})" if detail else ""))
+            try:
+                message = self._messages.get(timeout=min(remaining, 0.5))
+            except queue.Empty:
+                if self._process and self._process.poll() is not None:
+                    detail = "; ".join(self._stderr_tail()) or f"exit code {self._process.returncode}"
+                    raise MCPError(f"MCP process exited: {detail}")
+                continue
+            if message.get("error") and message.get("id") is None:
+                raise MCPError(message["error"].get("message", "MCP error"))
+            if message.get("id") != request_id:
+                continue
+            if message.get("error"):
+                raise MCPError(message["error"].get("message", "MCP tool call failed"))
+            return message.get("result")
+
+    def call_tool(self, name, arguments=None):
+        return self.request("tools/call", {"name": name, "arguments": arguments or {}})
+
+
+def mcp_tool_text(result):
+    if not result:
+        return ""
+    texts = []
+    for item in result.get("content") or []:
+        if item.get("type") == "text":
+            texts.append(item.get("text") or "")
+    return "\n".join(texts).strip()
+
+
+def parse_mcp_tool_result(result):
+    if not result:
+        return None
+    if result.get("structuredContent") is not None:
+        return result.get("structuredContent")
+    text = mcp_tool_text(result)
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return text
+
+
+def parse_admin_rule_hits(text):
+    hits = []
+    pattern = re.compile(
+        r"(?m)^\d+\.\s*(?P<name>.+?)\n"
+        r"\s*-\s*행정규칙(?:일련)?번호:\s*(?P<rule_no>[^\n]*)\n"
+        r"\s*-\s*행정규칙ID:\s*(?P<rule_id>[^\n]*)\n"
+        r"\s*-\s*(?:발령일|공포일):\s*(?P<date>[^\n]*)\n"
+        r"\s*-\s*구분:\s*(?P<kind>[^\n]*)\n"
+        r"\s*-\s*소관부처:\s*(?P<dept>[^\n]*)"
+    )
+    for m in pattern.finditer(text or ""):
+        hits.append({
+            "name": m.group("name").strip(),
+            "id": m.group("rule_id").strip(),
+            "rule_no": m.group("rule_no").strip(),
+            "date": m.group("date").strip(),
+            "kind": m.group("kind").strip(),
+            "dept": m.group("dept").strip(),
+        })
+    return hits
+
+
+def parse_ordinance_hits(text):
+    hits = []
+    pattern = re.compile(
+        r"\[(?P<mst>\d+)\]\s*(?P<name>.+?)\n"
+        r"\s*(?:기관|지자체):\s*(?P<org>[^\n]*)\n"
+        r"\s*(?:발령일|공포일):\s*(?P<date>[^\n]*)\n"
+        r"\s*시행일:\s*(?P<eff_date>[^\n]*)"
+    )
+    for m in pattern.finditer(text or ""):
+        hits.append({
+            "name": m.group("name").strip(),
+            "id": m.group("mst").strip(),
+            "ordinSeq": m.group("mst").strip(),
+            "org": m.group("org").strip(),
+            "date": m.group("date").strip(),
+            "eff_date": m.group("eff_date").strip(),
+        })
+    return hits
+
+
+def parse_legal_term_hits(text):
+    hits = []
+    for idx, match in enumerate(re.finditer(r"(?m)^📌\s*(?P<name>.+?)\s*$", text or ""), 1):
+        name = re.sub(r"\s+", " ", match.group("name")).strip()
+        if name:
+            hits.append({"name": name, "id": name, "index": idx, "kind": "용어"})
+    return hits
+
+
+def parse_english_law_hits(text):
+    hits = []
+    pattern = re.compile(
+        r"\[(?P<law_id>[^\]]+)\]\s*(?P<name>.+?)\n"
+        r"\s*한글명:\s*(?P<kor_name>[^\n]*)\n"
+        r"\s*시행일자:\s*(?P<date>[^\n]*)\n"
+        r"\s*법령구분:\s*(?P<kind>[^\n]*)\n"
+        r"\s*링크:\s*(?P<link>[^\n]*)",
+        re.S,
+    )
+    for m in pattern.finditer(text or ""):
+        link = html.unescape(m.group("link").strip())
+        mst_match = re.search(r"[?&]MST=(\d+)", link)
+        clean_name = re.sub(r"<[^>]+>", "", m.group("name"))
+        clean_name = html.unescape(re.sub(r"\s+", " ", clean_name)).strip()
+        hits.append({
+            "name": clean_name,
+            "id": m.group("law_id").strip(),
+            "lawId": m.group("law_id").strip(),
+            "mst": mst_match.group(1) if mst_match else "",
+            "kor_name": m.group("kor_name").strip(),
+            "date": m.group("date").strip(),
+            "kind": m.group("kind").strip(),
+            "link": link,
+        })
+    return hits
+
+
+def parse_ai_law_hits(text):
+    hits = []
+    blocks = re.split(r"(?m)(?=^📜\s+)", text or "")
+    for idx, block in enumerate(blocks, 1):
+        block = block.strip()
+        if not block.startswith("📜"):
+            continue
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if len(lines) < 2:
+            continue
+        law_name = lines[0].replace("📜", "", 1).strip()
+        article = lines[1]
+        title = f"{law_name} {article}".strip()
+        meta = ""
+        for line in lines:
+            if line.startswith("📅"):
+                meta = line.replace("📅", "", 1).strip()
+                break
+        hits.append({
+            "name": title,
+            "id": str(idx),
+            "law_name": law_name,
+            "article": article,
+            "date": meta,
+            "kind": "조문",
+            "summary": "\n".join(lines[2:8]).strip(),
+            "raw": block,
+        })
+    return hits
+
+
+def parse_decision_hits(text):
+    """범용 결정·판례 리스트 파서 - 번호. 제목 + 하위 메타데이터 포함"""
+    hits = []
+    raw = text or ""
+    # Split by numbered item boundaries
+    blocks = re.split(r"(?m)(?=^\d+\.\s)", raw)
+    for i, block in enumerate(blocks):
+        block = block.strip()
+        if not block:
+            continue
+        title_match = re.match(r"^\d+\.\s*(?P<name>.+?)(?:\n|$)", block)
+        if not title_match:
+            continue
+        name = title_match.group("name").strip()
+        if not name:
+            continue
+        hit = {"name": name, "id": str(i), "index": i}
+        # Extract sub-fields (- key: value lines)
+        for fld in re.finditer(r"^\s*[-·]\s*(?P<key>[^:：\n]+?)\s*[:：]\s*(?P<val>.+?)$", block, re.M):
+            key = fld.group("key").strip()
+            val = fld.group("val").strip()
+            kl = key.lower()
+            if any(k in kl for k in ("사건번호", "판결번호", "결정번호", "번호")):
+                hit["case_num"] = val
+                hit["id"] = val
+            elif any(k in kl for k in ("법원", "기관", "관청")):
+                hit["court"] = val
+                hit.setdefault("org", val)
+            elif any(k in kl for k in ("선고일", "결정일", "발령일", "날짜", "일자")):
+                hit["date"] = val
+            elif any(k in kl for k in ("구분", "종류", "유형")):
+                hit["kind"] = val
+            elif any(k in kl for k in ("주문", "결론", "요지", "핵심")):
+                hit["summary"] = val[:120]
+        hits.append(hit)
+    return hits
+
+
+def parse_law_search_hits(text):
+    hits = []
+    pattern = re.compile(
+        r"(?m)^\d+\.\s*(?P<name>.+?)\n"
+        r"\s*-\s*법령ID:\s*(?P<law_id>[^\n]+)\n"
+        r"\s*-\s*MST:\s*(?P<mst>[^\n]+)\n"
+        r"\s*-\s*공포일:\s*(?P<prom_date>[^\n]*)\n"
+        r"\s*-\s*구분:\s*(?P<kind>[^\n]*)"
+    )
+    for match in pattern.finditer(text or ""):
+        hits.append(
+            {
+                "name": match.group("name").strip(),
+                "law_id": match.group("law_id").strip(),
+                "mst": match.group("mst").strip(),
+                "prom_date": match.group("prom_date").strip(),
+                "kind": match.group("kind").strip(),
+            }
+        )
+    return hits
+
+
+LAW_ARTICLE_REF_RE = re.compile(r"(?:제\s*)?(\d+)\s*조(?:\s*의\s*(\d+))?")
+
+
+def extract_law_article_number(text):
+    match = LAW_ARTICLE_REF_RE.search(text or "")
+    if not match:
+        return ""
+    if match.group(2):
+        return f"제{match.group(1)}조의{match.group(2)}"
+    return f"제{match.group(1)}조"
+
+
+def strip_law_article_number(text):
+    raw_text = text or ""
+    match = LAW_ARTICLE_REF_RE.search(raw_text)
+    if match:
+        before = raw_text[:match.start()].strip()
+        if before:
+            return re.sub(r"\s+", " ", before).strip()
+    cleaned = LAW_ARTICLE_REF_RE.sub(" ", raw_text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def clean_law_mcp_text(text):
+    lines = []
+    for line in (text or "").splitlines():
+        if line.strip().startswith("💡"):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+def parse_law_recent_revisions(text):
+    lines = (text or "").splitlines()
+    buchi_lines = []
+    in_buchi = False
+    for line in lines:
+        if line.strip().startswith("부칙"):
+            in_buchi = True
+        if in_buchi:
+            buchi_lines.append(line.strip())
+    
+    if not buchi_lines:
+        return "최근 개정 정보(부칙)가 없습니다."
+    
+    # Limit to reasonable length
+    res = "\n".join(buchi_lines)
+    if len(res) > 800:
+        res = res[:800] + "...\n(이하 생략)"
+    return res.strip()
+
+def parse_law_article_list(text):
+    articles = []
+    in_toc = False
+    pattern = re.compile(r"^제(?P<num>\d+조(?:의\d+)?)\s*(?P<title>.*)$")
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "목차" in line:
+            in_toc = True
+            continue
+        if not in_toc:
+            continue
+        match = pattern.match(line)
+        if not match:
+            if articles and line.startswith("부칙"):
+                break
+            continue
+        articles.append(
+            {
+                "jo": f"제{match.group('num')}",
+                "title": match.group("title").strip() or f"제{match.group('num')}",
+            }
+        )
+        if len(articles) >= 800:
+            break
+    return articles
+
+
+def parse_law_article_detail(text):
+    cleaned = clean_law_mcp_text(text)
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if not lines:
+        return None
+
+    metadata = {}
+    header_indices = []
+    header_pattern = re.compile(r"^(제\d+조(?:의\d+)?)(?:\s*\(([^)]*)\)|\s+(.+))?$")
+
+    for idx, line in enumerate(lines):
+        if line.startswith("법령명:"):
+            metadata["law_name"] = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("공포일:"):
+            metadata["promulgation_date"] = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("시행일:"):
+            metadata["effective_date"] = line.split(":", 1)[1].strip()
+            continue
+        match = header_pattern.match(line)
+        if match:
+            header_indices.append((idx, match))
+            if len(header_indices) >= 2:
+                break
+
+    if not header_indices:
+        return None
+
+    first_idx, first_match = header_indices[0]
+    jo = first_match.group(1)
+    title = (first_match.group(2) or first_match.group(3) or "").strip()
+    content_start = first_idx + 1
+
+    if len(header_indices) > 1:
+        second_idx, second_match = header_indices[1]
+        if second_idx == first_idx + 1 and second_match.group(1) == jo:
+            title = (second_match.group(2) or second_match.group(3) or title).strip()
+            content_start = second_idx + 1
+
+    body_lines = lines[content_start:]
+    if not body_lines or any("목차" in line for line in body_lines[:2]):
+        return None
+
+    blocks = []
+    paragraph_re = re.compile(r"^([①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳㉑㉒㉓㉔㉕㉖㉗㉘㉙㉚])\s*(.*)$")
+    item_re = re.compile(r"^(\d+)\.\s*(.*)$")
+    subitem_re = re.compile(r"^([가-힣])\.\s+(.*)$")
+
+    def append_block(block_type, marker, block_text):
+        blocks.append({"type": block_type, "marker": marker, "text": block_text.strip()})
+
+    for line in body_lines:
+        if header_pattern.match(line) and blocks:
+            break
+        paragraph_match = paragraph_re.match(line)
+        if paragraph_match:
+            append_block("paragraph", paragraph_match.group(1), paragraph_match.group(2))
+            continue
+        item_match = item_re.match(line)
+        if item_match:
+            append_block("item", f"{item_match.group(1)}.", item_match.group(2))
+            continue
+        subitem_match = subitem_re.match(line)
+        if subitem_match:
+            append_block("subitem", f"{subitem_match.group(1)}.", subitem_match.group(2))
+            continue
+        if blocks:
+            blocks[-1]["text"] = f"{blocks[-1]['text']} {line}".strip()
+        else:
+            append_block("lead", "", line)
+
+    return {
+        "metadata": metadata,
+        "jo": jo,
+        "title": title,
+        "blocks": blocks,
+        "plain_text": "\n".join(body_lines).strip(),
+    }
+
+
+def compact_batch_law_text(text):
+    lines = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("📜 "):
+            continue
+        if stripped.startswith("---"):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def extract_law_mentions(text, limit=12):
+    mentions = []
+    seen = set()
+    patterns = [
+        r"[「『｢](?P<name>[^」』｣]{2,80}(?:법|령|규칙|규정|고시|조례))[^」』｣]*[」』｣]",
+        r"(?P<name>[가-힣A-Za-z0-9ㆍ·\s]{2,80}(?:법|령|규칙|규정|고시|조례))\s*제\d+조",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text or ""):
+            name = re.sub(r"\s+", " ", match.group("name")).strip()
+            if len(name) < 2 or name in seen:
+                continue
+            seen.add(name)
+            mentions.append(name)
+            if len(mentions) >= limit:
+                return mentions
+    return mentions
+
+
+def build_law_lookup_text(query, search_text, selected_hit, law_text):
+    lines = [
+        f"검색어: {query}",
+        "",
+        "1차 검색 결과",
+        clean_law_mcp_text(search_text) or "검색 결과가 없습니다.",
+    ]
+    if selected_hit:
+        lines.extend(
+            [
+                "",
+                f"자동 조회: {selected_hit['name']} (MST {selected_hit['mst']})",
+                "",
+                law_text.strip() or "법령 본문 조회 결과가 없습니다.",
+            ]
+        )
+    return "\n".join(lines).strip()
 
 
 class RelatedNewsMatcher:
@@ -476,6 +1064,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
         "no_action_opinion": ["fsc_no_action_opinion"],
         "other_data": ["kfb_publicdata_other", "fsec_bbs_222"],
     }
+    ALLOWED_LAW_MCP_TOOLS = {
+        "search_law", "get_law_text", "search_all", "advanced_search", "suggest_law_names",
+        "search_admin_rule", "get_admin_rule",
+        "search_ordinance", "get_ordinance",
+        "compare_old_new", "get_three_tier", "compare_articles",
+        "get_annexes", "get_law_tree", "get_law_system_tree",
+        "get_law_statistics",
+        "get_external_links", "parse_article_links", "get_article_history",
+        "get_law_history", "get_historical_law", "search_historical_law",
+        "search_precedents", "get_precedent_text", "summarize_precedent",
+        "extract_precedent_keywords", "find_similar_precedents",
+        "search_interpretations", "get_interpretation_text",
+        "search_tax_tribunal_decisions", "get_tax_tribunal_decision_text",
+        "search_customs_interpretations", "get_customs_interpretation_text",
+        "search_constitutional_decisions", "get_constitutional_decision_text",
+        "search_admin_appeals", "get_admin_appeal_text",
+        "search_ftc_decisions", "get_ftc_decision_text",
+        "search_pipc_decisions", "get_pipc_decision_text",
+        "search_nlrc_decisions", "get_nlrc_decision_text",
+        "search_english_law", "get_english_law_text",
+        "search_legal_terms", "search_ai_law",
+        "get_legal_term_kb", "get_legal_term_detail", "get_daily_term",
+        "get_daily_to_legal", "get_legal_to_daily", "get_term_articles", "get_related_laws",
+        "parse_jo_code", "get_batch_articles", "get_article_with_precedents",
+        "discover_tools", "execute_tool",
+        "chain_full_research", "chain_law_system", "chain_action_basis",
+        "chain_dispute_prep", "chain_amendment_track", "chain_ordinance_compare",
+        "chain_procedure_detail", "chain_document_review",
+    }
 
     def _json_response(self, payload, status=200):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -521,6 +1138,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         data = text.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
+        if content_type.startswith("text/html"):
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -735,11 +1355,305 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         # ──────────────────────────────────────────────
 
+        if path == "/api/law-mcp/status":
+            if not self._require_auth_api():
+                return
+            self.handle_law_mcp_status()
+            return
+
         if qs:
             self.handle_notifications(qs)
             return
 
         self._json_response({"error": "Not found"}, status=404)
+
+    def _read_json_body(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            return json.loads(body.decode("utf-8"))
+        except Exception:
+            return None
+
+    def _run_kordoc_parse(self, file_path):
+        npx_cmd = shutil.which("npx.cmd") or shutil.which("npx") or "npx"
+        proc = subprocess.run(
+            [npx_cmd, "kordoc", str(file_path), "--format", "json"],
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(detail[:1000] or f"kordoc exited with {proc.returncode}")
+        raw = proc.stdout.strip()
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end < start:
+            raise RuntimeError("kordoc returned non-JSON output")
+        return json.loads(raw[start:end + 1])
+
+    def handle_kordoc_parse(self):
+        if not self._require_auth_api():
+            return
+
+        content_type = self.headers.get("Content-Type", "")
+        saved_path = None
+        original_name = ""
+        try:
+            if content_type.startswith("multipart/form-data"):
+                form = cgi.FieldStorage(
+                    fp=self.rfile,
+                    headers=self.headers,
+                    environ={
+                        "REQUEST_METHOD": "POST",
+                        "CONTENT_TYPE": content_type,
+                    },
+                )
+                file_item = form["file"] if "file" in form else None
+                if not file_item or not getattr(file_item, "filename", ""):
+                    self._json_response({"error": "file is required"}, status=400)
+                    return
+                original_name = Path(file_item.filename).name
+                ext = Path(original_name).suffix.lower()
+                if ext not in {".hwp", ".hwpx", ".pdf", ".xlsx", ".docx"}:
+                    self._json_response({"error": "unsupported file type"}, status=400)
+                    return
+                upload_dir = BASE_DIR / "tmp" / "kordoc_uploads"
+                upload_dir.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=ext, dir=str(upload_dir)) as tmp_file:
+                    shutil.copyfileobj(file_item.file, tmp_file)
+                    saved_path = Path(tmp_file.name)
+            else:
+                payload = self._read_json_body()
+                if payload is None:
+                    self._json_response({"error": "Invalid JSON"}, status=400)
+                    return
+                requested_path = Path(str(payload.get("path") or "")).expanduser()
+                if not requested_path.is_absolute():
+                    requested_path = (BASE_DIR / requested_path).resolve()
+                else:
+                    requested_path = requested_path.resolve()
+                if not requested_path.exists() or not requested_path.is_file():
+                    self._json_response({"error": "file not found"}, status=404)
+                    return
+                saved_path = requested_path
+                original_name = requested_path.name
+
+            parsed = self._run_kordoc_parse(saved_path)
+            markdown = parsed.get("markdown") or ""
+            blocks = parsed.get("blocks") or []
+            metadata = parsed.get("metadata") or {}
+            self._json_response(
+                {
+                    "ok": True,
+                    "file_name": original_name,
+                    "file_type": parsed.get("fileType") or Path(original_name).suffix.lstrip("."),
+                    "markdown": markdown,
+                    "metadata": metadata,
+                    "block_count": len(blocks),
+                    "law_mentions": extract_law_mentions(markdown),
+                }
+            )
+        except subprocess.TimeoutExpired:
+            self._json_response({"ok": False, "error": "kordoc parse timed out"}, status=504)
+        except Exception as exc:
+            self._json_response({"ok": False, "error": f"kordoc parse failed: {exc}"}, status=500)
+        finally:
+            if saved_path and "tmp/kordoc_uploads" in str(saved_path).replace("\\", "/"):
+                try:
+                    saved_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    def _article_law_query(self, article_id):
+        conn = self._db()
+        try:
+            row = conn.execute(
+                "SELECT title, content_text FROM articles WHERE id = ?",
+                (article_id,),
+            ).fetchone()
+            if not row:
+                return ""
+            source_text = "\n".join([row["title"] or "", row["content_text"] or ""])
+        finally:
+            conn.close()
+
+        # Prefer law names in Korean corner brackets, e.g. 「자본시장과 금융투자업에 관한 법률」.
+        for match in re.findall(r"[「『](.*?)[」』]", source_text):
+            candidate = re.sub(r"\s+", " ", match).strip()
+            if any(token in candidate for token in ("법", "령", "규정", "규칙", "고시")):
+                return candidate[:120]
+
+        title = re.sub(r"\s+", " ", (source_text.splitlines()[0] if source_text else "")).strip()
+        return title[:120]
+
+    def handle_law_mcp_status(self):
+        self._json_response(
+            {
+                "configured": KoreanLawMCPClient.is_configured(),
+                "command_available": KoreanLawMCPClient.available(),
+                "command": KoreanLawMCPClient.command_preview(),
+                "required_env": ["LAW_OC"],
+                "optional_env": ["KOREAN_LAW_MCP_COMMAND", "KOREAN_LAW_MCP_ARGS", "KOREAN_LAW_MCP_TIMEOUT"],
+            }
+        )
+
+    def handle_law_mcp_search(self):
+        payload = self._read_json_body()
+        if payload is None:
+            self._json_response({"error": "Invalid JSON"}, status=400)
+            return
+
+        query = (payload.get("query") or "").strip()
+        article_id = to_int(payload.get("article_id"), 0)
+        if not query and article_id > 0:
+            query = self._article_law_query(article_id)
+        if not query:
+            self._json_response({"error": "query or article_id is required"}, status=400)
+            return
+
+        try:
+            with KoreanLawMCPClient() as client:
+                jo = extract_law_article_number(query)
+                law_query = strip_law_article_number(query) if jo else query
+                if not law_query and article_id > 0:
+                    law_query = self._article_law_query(article_id)
+                if not law_query:
+                    law_query = query
+
+                search_result = client.call_tool("search_law", {"query": law_query})
+                search_text = mcp_tool_text(search_result)
+                hits = parse_law_search_hits(search_text)
+                search_text = clean_law_mcp_text(search_text)
+
+            self._json_response(
+                {
+                    "ok": True,
+                    "tool": "law_lookup",
+                    "query": query,
+                    "law_query": law_query,
+                    "selected": None,
+                    "jo": jo,
+                    "hits": hits,
+                    "articles": [],
+                    "revisions": "",
+                    "compare": "",
+                    "detail": "",
+                    "article_detail": None,
+                    "result": search_text,
+                    "text": search_text,
+                }
+            )
+        except MCPError as exc:
+            self._json_response({"ok": False, "error": str(exc)}, status=503)
+        except Exception as exc:
+            self._json_response({"ok": False, "error": f"law MCP search failed: {exc}"}, status=500)
+
+    def handle_law_mcp_call(self):
+        payload = self._read_json_body()
+        if payload is None:
+            self._json_response({"error": "Invalid JSON"}, status=400)
+            return
+
+        tool = (payload.get("tool") or "").strip()
+        arguments = payload.get("arguments") or {}
+        if tool not in self.ALLOWED_LAW_MCP_TOOLS:
+            self._json_response({"error": f"tool is not allowed: {tool}"}, status=400)
+            return
+        if not isinstance(arguments, dict):
+            self._json_response({"error": "arguments must be an object"}, status=400)
+            return
+
+        try:
+            with KoreanLawMCPClient() as client:
+                result = client.call_tool(tool, arguments)
+                system_tree = ""
+                law_index_text = ""
+                batch_full_text = ""
+                if tool == "get_law_text":
+                    tree_args = {
+                        key: arguments[key]
+                        for key in ("mst", "lawId", "lawName")
+                        if arguments.get(key)
+                    }
+                    if tree_args:
+                        try:
+                            tree_result = client.call_tool("get_law_system_tree", tree_args)
+                            system_tree = clean_law_mcp_text(mcp_tool_text(tree_result))
+                        except Exception:
+                            system_tree = ""
+                    if arguments.get("jo") and tree_args:
+                        try:
+                            index_result = client.call_tool("get_law_text", tree_args)
+                            law_index_text = clean_law_mcp_text(mcp_tool_text(index_result))
+                        except Exception:
+                            law_index_text = ""
+            text = clean_law_mcp_text(mcp_tool_text(result))
+            article_detail = parse_law_article_detail(text) if tool == "get_law_text" and "jo" in arguments else None
+            index_text = law_index_text or text
+            articles = parse_law_article_list(index_text) if tool == "get_law_text" else []
+            revisions = parse_law_recent_revisions(index_text) if tool == "get_law_text" else ""
+            if tool == "get_law_text" and "jo" not in arguments and articles:
+                chunks = [articles[i:i + 50] for i in range(0, min(len(articles), 700), 50)]
+                full_parts = []
+                with KoreanLawMCPClient() as batch_client:
+                    batch_args_base = {
+                        key: arguments[key]
+                        for key in ("mst", "lawId")
+                        if arguments.get(key)
+                    }
+                    for chunk in chunks:
+                        batch_args = dict(batch_args_base)
+                        batch_args["articles"] = [item["jo"] for item in chunk if item.get("jo")]
+                        if not batch_args.get("articles"):
+                            continue
+                        batch_result = batch_client.call_tool("get_batch_articles", batch_args)
+                        full_parts.append(compact_batch_law_text(clean_law_mcp_text(mcp_tool_text(batch_result))))
+                if full_parts:
+                    batch_full_text = "\n\n".join(part for part in full_parts if part).strip()
+                    if batch_full_text:
+                        text = batch_full_text
+            # Structured hits for category search tools
+            hits = []
+            if tool == "search_admin_rule":
+                hits = parse_admin_rule_hits(text)
+            elif tool == "search_ordinance":
+                hits = parse_ordinance_hits(text)
+            elif tool == "search_legal_terms":
+                hits = parse_legal_term_hits(text)
+            elif tool == "search_english_law":
+                hits = parse_english_law_hits(text)
+            elif tool == "search_ai_law":
+                hits = parse_ai_law_hits(text)
+            elif tool in ("search_precedents", "search_interpretations",
+                          "search_constitutional_decisions", "search_tax_tribunal_decisions",
+                          "search_admin_appeals", "search_ftc_decisions",
+                          "search_pipc_decisions", "search_nlrc_decisions",
+                          "search_customs_interpretations"):
+                hits = parse_decision_hits(text)
+            self._json_response(
+                {
+                    "ok": True,
+                    "tool": tool,
+                    "arguments": arguments,
+                    "result": article_detail or text,
+                    "text": text,
+                    "full_text": batch_full_text,
+                    "article_detail": article_detail,
+                    "articles": articles,
+                    "revisions": revisions,
+                    "system_tree": system_tree,
+                    "hits": hits,
+                }
+            )
+        except MCPError as exc:
+            self._json_response({"ok": False, "error": str(exc)}, status=503)
+        except Exception as exc:
+            self._json_response({"ok": False, "error": f"law MCP call failed: {exc}"}, status=500)
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -773,6 +1687,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
 
             self._json_response({"error": "?꾩씠???먮뒗 鍮꾨?踰덊샇媛 ?щ컮瑜댁? ?딆뒿?덈떎."}, status=401)
+            return
+
+        if path == "/api/law-mcp/search":
+            if not self._require_auth_api():
+                return
+            self.handle_law_mcp_search()
+            return
+
+        if path == "/api/law-mcp/call":
+            if not self._require_auth_api():
+                return
+            self.handle_law_mcp_call()
+            return
+
+        if path == "/api/kordoc/parse":
+            self.handle_kordoc_parse()
+            return
+
+        if path == "/api/article/analyze-internal-rules":
+            if not self._require_auth_api():
+                return
+            self.handle_article_internal_rule_analysis()
             return
 
         if path == "/api/recipients":
@@ -1251,6 +2187,139 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json_response({"item": None})
         finally:
             conn.close()
+
+    def _latest_article_report(self, conn, article_id):
+        row = conn.execute(
+            """
+            SELECT
+                ro.id,
+                ro.title,
+                ro.summary_text,
+                ro.report_markdown,
+                ro.llm_status,
+                ro.llm_provider,
+                ro.llm_model,
+                ro.llm_completed_at,
+                ro.created_at
+            FROM report_outputs ro
+            JOIN report_output_sources rs ON rs.report_output_id = ro.id
+            WHERE rs.article_id = ?
+              AND COALESCE(ro.llm_status, 'pending') = 'completed'
+            ORDER BY COALESCE(ro.llm_completed_at, ro.created_at) DESC, ro.id DESC
+            LIMIT 1
+            """,
+            (article_id,),
+        ).fetchone()
+        if not row:
+            return None
+        payload = dict(row)
+        source_count = conn.execute(
+            "SELECT COUNT(*) FROM report_output_sources WHERE report_output_id = ?",
+            (row["id"],),
+        ).fetchone()[0]
+        payload["source_count"] = int(source_count or 0)
+        return payload
+
+    def handle_article_internal_rule_analysis(self):
+        payload = self._read_json_body()
+        if payload is None:
+            self._json_response({"error": "Invalid JSON"}, status=400)
+            return
+        article_id = to_int(payload.get("article_id"), 0)
+        if article_id <= 0:
+            self._json_response({"error": "article_id is required"}, status=400)
+            return
+
+        conn = self._db()
+        try:
+            article = conn.execute(
+                """
+                SELECT id, title, source_channel, published_at
+                FROM articles
+                WHERE id = ?
+                """,
+                (article_id,),
+            ).fetchone()
+            if not article:
+                self._json_response({"error": "article not found"}, status=404)
+                return
+            if article["source_channel"] not in {
+                "fsc_admin_guidance_notice",
+                "fss_admin_guidance_notice",
+                "fsc_admin_guidance_enforcement",
+                "fss_admin_guidance_enforcement",
+            }:
+                self._json_response({"error": "행정지도 예고/시행 자료만 분석할 수 있습니다."}, status=400)
+                return
+            target_date = (article["published_at"] or "")[:10] or datetime.now(KST).date().isoformat()
+        finally:
+            conn.close()
+
+        try:
+            from internal_rule_impact_builder import InternalRuleImpactBuilder, InternalRuleImpactConfig
+            from llm_report_pipeline import LlmPipelineConfig, LlmReportPipelineApp
+
+            cfg = InternalRuleImpactConfig(
+                db_path=str(DashboardHandler.db_path),
+                rule_dir=os.environ.get("INTERNAL_RULE_DIR") or str(BASE_DIR / "3. 내규목록"),
+                from_date=target_date,
+                to_date=target_date,
+                max_guidance=1,
+                max_rules=16,
+                max_chars_per_guidance=7000,
+                max_chars_per_rule=5000,
+                cache_dir=str(BASE_DIR / "tmp" / "internal_rule_cache"),
+                only_article_id=article_id,
+            )
+            build_result = InternalRuleImpactBuilder(cfg).run()
+            output_id = int(build_result.get("output_id") or 0)
+            if output_id <= 0:
+                self._json_response({"error": "analysis payload was not created"}, status=500)
+                return
+
+            provider = (os.environ.get("LLM_PROVIDER") or "openai").strip().lower()
+            model = os.environ.get("LLM_MODEL") or "google/gemma-4-26B-A4B-it"
+            api_base = os.environ.get("LLM_API_BASE") or os.environ.get("OPENAI_API_BASE") or "http://222.110.207.7:8000/v1"
+            api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+            if provider == "google":
+                model = os.environ.get("LLM_MODEL") or os.environ.get("GOOGLE_MODEL") or "gemini-2.0-flash"
+                api_base = os.environ.get("LLM_API_BASE") or os.environ.get("GOOGLE_API_BASE") or "https://generativelanguage.googleapis.com/v1beta"
+                api_key = os.environ.get("LLM_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
+
+            llm_cfg = LlmPipelineConfig(
+                db_path=str(DashboardHandler.db_path),
+                provider=provider,
+                model=model,
+                api_base=api_base,
+                api_key=api_key,
+                max_outputs=1,
+                temperature=float(os.environ.get("LLM_TEMPERATURE") or "0.2"),
+                dry_run=False,
+                only_output_id=output_id,
+                prompt_profile="internal_rule_impact",
+                company_name=os.environ.get("LLM_COMPANY_NAME") or "MetLife Korea",
+            )
+            llm_result = LlmReportPipelineApp(llm_cfg).run()
+
+            conn = self._db()
+            try:
+                item = self._latest_article_report(conn, article_id)
+            finally:
+                conn.close()
+            if not item:
+                self._json_response(
+                    {
+                        "ok": False,
+                        "error": "LLM report was not completed",
+                        "build_result": build_result,
+                        "llm_result": llm_result,
+                    },
+                    status=500,
+                )
+                return
+            self._json_response({"ok": True, "build_result": build_result, "llm_result": llm_result, "item": item})
+        except Exception as exc:
+            self._json_response({"ok": False, "error": f"analysis failed: {exc}"}, status=500)
 
     def handle_similar(self, qs):
         article_id = to_int(qs.get("id", ["0"])[0], 0)
